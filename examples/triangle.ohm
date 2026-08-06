@@ -1,0 +1,13 @@
+// Sums 1..n with a loop, exercising the FSM and register file.
+input  u8 n;
+output u8 total;
+
+proc main() {
+    var u8 i = n;
+    var u8 acc = 0;
+    while (i != 0) {
+        acc = acc + i;
+        i = i - 1;
+    }
+    total = acc;
+}

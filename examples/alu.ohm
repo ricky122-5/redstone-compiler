@@ -1,0 +1,13 @@
+// A small ALU. Still straight-line: the `? :` chain becomes a mux tree, and
+// every operation is physically present and computing at once.
+input  u8 a;
+input  u8 b;
+input  u2 op;
+output u8 r;
+
+proc main() {
+    r = (op == 0) ? a + b
+      : (op == 1) ? a - b
+      : (op == 2) ? (a & b)
+      :             (a ^ b);
+}

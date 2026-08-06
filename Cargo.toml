@@ -1,0 +1,19 @@
+[package]
+name = "ohmc"
+version = "0.1.0"
+edition = "2021"
+description = "Compiles the Ohm language into a Minecraft redstone circuit, emitted as a Sponge v3 schematic"
+
+[lib]
+name = "ohmc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ohmc"
+path = "src/main.rs"
+
+[dependencies]
+flate2 = "1"
+
+[profile.release]
+opt-level = 3

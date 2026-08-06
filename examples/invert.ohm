@@ -1,0 +1,8 @@
+// The smallest complete example: straight-line, so it compiles all the way
+// down to placed redstone and a loadable schematic.
+input  u1 a;
+output u1 q;
+
+proc main() {
+    q = !a;
+}

@@ -1,0 +1,9 @@
+// Straight-line program: no branches, so this compiles to a purely
+// combinational 8-bit ripple-carry adder and can be placed as redstone.
+input  u8 a;
+input  u8 b;
+output u8 sum;
+
+proc main() {
+    sum = a + b;
+}

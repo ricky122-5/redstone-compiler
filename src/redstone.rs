@@ -1,0 +1,543 @@
+//! Redstone power semantics and a tick-accurate simulator.
+//!
+//! This module is the single source of truth for "what does Minecraft do".
+//! Every rule the compiler relies on is written down here explicitly so it can
+//! be audited in one place rather than being smeared across the layout code.
+//!
+//! # The rules we model
+//!
+//! Power comes in two flavours:
+//!
+//! * **Strong power.** A block is strongly powered by a lit torch directly
+//!   beneath it, by a powered repeater facing into it, or by a lever attached to
+//!   it. A strongly powered block energises *all* adjacent dust to level 15.
+//! * **Weak power.** A block is weakly powered by dust sitting on top of it, or
+//!   by dust pointing into it. A weakly powered block does **not** energise
+//!   adjacent dust, but it *does* extinguish a torch attached to it and it does
+//!   drive a repeater reading from it.
+//!
+//! The compiler's cell library is deliberately built to depend only on the
+//! unambiguous subset of these interactions:
+//!
+//! 1. dust on top of a block weakly powers that block;
+//! 2. a torch is lit exactly when its support block is unpowered (weak counts);
+//! 3. a lit torch strongly powers the block above it;
+//! 4. a repeater strongly powers the block it faces into and restores level 15.
+//!
+//! # Timing model
+//!
+//! We simulate at redstone-tick granularity (1 redstone tick = 2 game ticks).
+//! A torch inverts with 1 tick of delay; a repeater delays by its `delay`
+//! setting. Dust propagates combinationally within a tick, which is what
+//! Minecraft does for all practical purposes.
+//!
+//! We deliberately do **not** model sub-tick update ordering, torch burnout, or
+//! quasi-connectivity. The generated circuits are synchronous and are clocked
+//! well below the burnout threshold, so those effects cannot be observed; this
+//! is an idealised but faithful model of the designs we actually emit.
+
+use crate::world::{down, offset, up, Block, Conn, Dir, Grid, Pos};
+use std::collections::{HashMap, VecDeque};
+
+pub const MAX_POWER: u8 = 15;
+
+/// Combinational snapshot: dust levels and block power, derived from the
+/// current state of the active components.
+pub struct Field {
+    pub dust: HashMap<Pos, u8>,
+    strong: HashMap<Pos, bool>,
+    weak: HashMap<Pos, bool>,
+}
+
+impl Field {
+    pub fn dust_at(&self, p: Pos) -> u8 {
+        self.dust.get(&p).copied().unwrap_or(0)
+    }
+
+    /// True if the block at `p` is powered by any means. This is the predicate
+    /// that decides whether a torch attached to `p` goes out.
+    pub fn block_powered(&self, p: Pos) -> bool {
+        self.strong.get(&p).copied().unwrap_or(false)
+            || self.weak.get(&p).copied().unwrap_or(false)
+    }
+
+    pub fn block_strong(&self, p: Pos) -> bool {
+        self.strong.get(&p).copied().unwrap_or(false)
+    }
+}
+
+/// Mutable state of every active component in the grid.
+#[derive(Clone, Debug, Default)]
+pub struct SimState {
+    pub torch_lit: HashMap<Pos, bool>,
+    pub repeater_powered: HashMap<Pos, bool>,
+    pub lever_on: HashMap<Pos, bool>,
+    /// Scheduled transitions: position -> (tick at which it fires, new value).
+    pending: HashMap<Pos, (u64, bool)>,
+    pub tick: u64,
+}
+
+pub struct Sim<'g> {
+    pub grid: &'g Grid,
+    pub state: SimState,
+    torches: Vec<Pos>,
+    repeaters: Vec<Pos>,
+}
+
+impl<'g> Sim<'g> {
+    pub fn new(grid: &'g Grid) -> Self {
+        let mut state = SimState::default();
+        let mut torches = Vec::new();
+        let mut repeaters = Vec::new();
+        for (&p, &b) in grid.iter() {
+            match b {
+                Block::WallTorch { lit, .. } | Block::Torch { lit } => {
+                    state.torch_lit.insert(p, lit);
+                    torches.push(p);
+                }
+                Block::Repeater { powered, .. } => {
+                    state.repeater_powered.insert(p, powered);
+                    repeaters.push(p);
+                }
+                Block::Lever { powered, .. } => {
+                    state.lever_on.insert(p, powered);
+                }
+                _ => {}
+            }
+        }
+        // Deterministic iteration order keeps runs reproducible.
+        torches.sort();
+        repeaters.sort();
+        Sim { grid, state, torches, repeaters }
+    }
+
+    pub fn set_lever(&mut self, p: Pos, on: bool) {
+        self.state.lever_on.insert(p, on);
+    }
+
+    /// Support block of a torch: the block it is mounted on.
+    fn torch_support(&self, p: Pos) -> Pos {
+        match self.grid.get(p) {
+            // `facing` points away from the support, so the support is behind it.
+            Block::WallTorch { facing, .. } => offset(p, facing.opposite()),
+            Block::Torch { .. } => down(p),
+            _ => down(p),
+        }
+    }
+
+    /// Compute the combinational field from the current component states.
+    pub fn field(&self) -> Field {
+        let mut strong: HashMap<Pos, bool> = HashMap::new();
+        let mut weak: HashMap<Pos, bool> = HashMap::new();
+
+        // --- Strong power from active components ------------------------------
+        for (&p, &b) in self.grid.iter() {
+            match b {
+                Block::WallTorch { .. } | Block::Torch { .. } => {
+                    if self.state.torch_lit.get(&p).copied().unwrap_or(false) {
+                        // A lit torch strongly powers the block above it.
+                        let a = up(p);
+                        if self.grid.get(a).conducts() {
+                            strong.insert(a, true);
+                        }
+                    }
+                }
+                Block::Repeater { facing, .. } => {
+                    if self.state.repeater_powered.get(&p).copied().unwrap_or(false) {
+                        // Output is opposite the `facing` (input) side.
+                        let out = offset(p, facing.opposite());
+                        if self.grid.get(out).conducts() {
+                            strong.insert(out, true);
+                        }
+                    }
+                }
+                Block::Lever { face, facing, .. } => {
+                    if self.state.lever_on.get(&p).copied().unwrap_or(false) {
+                        let support = match face {
+                            crate::world::Face::Floor => down(p),
+                            crate::world::Face::Ceiling => up(p),
+                            crate::world::Face::Wall => offset(p, facing.opposite()),
+                        };
+                        if self.grid.get(support).conducts() {
+                            strong.insert(support, true);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // --- Dust levels ------------------------------------------------------
+        let dust = self.solve_dust(&strong);
+
+        // --- Weak power from dust --------------------------------------------
+        for (&p, &level) in &dust {
+            if level == 0 {
+                continue;
+            }
+            for target in self.dust_powers(p) {
+                if self.grid.get(target).conducts() {
+                    weak.insert(target, true);
+                }
+            }
+        }
+
+        Field { dust, strong, weak }
+    }
+
+    /// Which blocks a dust at `p` weakly powers: always the block beneath, plus
+    /// the blocks it points into.
+    ///
+    /// Dust with a single connection renders as a straight line and therefore
+    /// points at *both* ends of that axis - a real and frequently surprising
+    /// Minecraft behaviour that we model faithfully so the layout checker can
+    /// catch accidental couplings.
+    fn dust_powers(&self, p: Pos) -> Vec<Pos> {
+        let mut out = vec![down(p)];
+        let shape = self.grid.dust_shape(p);
+        let dirs: Vec<Dir> = Dir::ALL
+            .into_iter()
+            .filter(|&d| !matches!(shape_conn(&shape, d), Conn::None))
+            .collect();
+        match dirs.len() {
+            0 => {}
+            1 => {
+                out.push(offset(p, dirs[0]));
+                out.push(offset(p, dirs[0].opposite()));
+            }
+            _ => {
+                for d in dirs {
+                    out.push(offset(p, d));
+                }
+            }
+        }
+        out
+    }
+
+    /// Dust positions this dust conducts into (its electrical neighbours).
+    fn dust_neighbors(&self, p: Pos) -> Vec<Pos> {
+        let mut out = Vec::new();
+        let shape = self.grid.dust_shape(p);
+        for d in Dir::ALL {
+            let n = offset(p, d);
+            match shape_conn(&shape, d) {
+                Conn::None => {}
+                Conn::Up => {
+                    if matches!(self.grid.get(up(n)), Block::Dust { .. }) {
+                        out.push(up(n));
+                    }
+                }
+                Conn::Side => {
+                    if matches!(self.grid.get(n), Block::Dust { .. }) {
+                        out.push(n);
+                    } else if matches!(self.grid.get(down(n)), Block::Dust { .. }) {
+                        out.push(down(n));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Seed every directly driven dust at 15, then relax outward losing one
+    /// level per block. A bucket queue would be marginally faster, but circuits
+    /// have few sources and the BFS is not the bottleneck.
+    fn solve_dust(&self, strong: &HashMap<Pos, bool>) -> HashMap<Pos, u8> {
+        let mut level: HashMap<Pos, u8> = HashMap::new();
+        let mut q: VecDeque<Pos> = VecDeque::new();
+
+        let seed = |level: &mut HashMap<Pos, u8>, q: &mut VecDeque<Pos>, p: Pos, v: u8| {
+            if matches!(self.grid.get(p), Block::Dust { .. })
+                && level.get(&p).copied().unwrap_or(0) < v
+            {
+                level.insert(p, v);
+                q.push_back(p);
+            }
+        };
+
+        for (&p, &b) in self.grid.iter() {
+            match b {
+                Block::WallTorch { .. } | Block::Torch { .. } => {
+                    if self.state.torch_lit.get(&p).copied().unwrap_or(false) {
+                        for d in Dir::ALL {
+                            seed(&mut level, &mut q, offset(p, d), MAX_POWER);
+                        }
+                        seed(&mut level, &mut q, up(p), MAX_POWER);
+                    }
+                }
+                Block::Repeater { facing, .. } => {
+                    if self.state.repeater_powered.get(&p).copied().unwrap_or(false) {
+                        seed(&mut level, &mut q, offset(p, facing.opposite()), MAX_POWER);
+                    }
+                }
+                Block::Lever { .. } => {
+                    if self.state.lever_on.get(&p).copied().unwrap_or(false) {
+                        for d in Dir::ALL {
+                            seed(&mut level, &mut q, offset(p, d), MAX_POWER);
+                        }
+                        seed(&mut level, &mut q, down(p), MAX_POWER);
+                        seed(&mut level, &mut q, up(p), MAX_POWER);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Strongly powered blocks energise all adjacent dust to 15.
+        for (&bp, &is_strong) in strong {
+            if !is_strong {
+                continue;
+            }
+            for d in Dir::ALL {
+                seed(&mut level, &mut q, offset(bp, d), MAX_POWER);
+            }
+            seed(&mut level, &mut q, up(bp), MAX_POWER);
+            seed(&mut level, &mut q, down(bp), MAX_POWER);
+        }
+
+        while let Some(p) = q.pop_front() {
+            let cur = level[&p];
+            if cur <= 1 {
+                continue;
+            }
+            for n in self.dust_neighbors(p) {
+                if level.get(&n).copied().unwrap_or(0) < cur - 1 {
+                    level.insert(n, cur - 1);
+                    q.push_back(n);
+                }
+            }
+        }
+        level
+    }
+
+    /// Is there an active signal entering the repeater at `rp` from its input side?
+    fn repeater_input(&self, rp: Pos, facing: Dir, f: &Field) -> bool {
+        let src = offset(rp, facing);
+        match self.grid.get(src) {
+            Block::Dust { .. } => f.dust_at(src) > 0,
+            Block::WallTorch { .. } | Block::Torch { .. } => {
+                self.state.torch_lit.get(&src).copied().unwrap_or(false)
+            }
+            Block::Lever { .. } => self.state.lever_on.get(&src).copied().unwrap_or(false),
+            Block::Repeater { facing: f2, .. } => {
+                // Only if that repeater's output points at us.
+                offset(src, f2.opposite()) == rp
+                    && self.state.repeater_powered.get(&src).copied().unwrap_or(false)
+            }
+            // Repeaters read both strong and weak power from a solid block.
+            b if b.conducts() => f.block_powered(src),
+            _ => false,
+        }
+    }
+
+    /// Advance one redstone tick.
+    pub fn step(&mut self) {
+        self.state.tick += 1;
+        let now = self.state.tick;
+
+        // Fire everything scheduled for this tick.
+        let due: Vec<(Pos, bool)> = self
+            .state
+            .pending
+            .iter()
+            .filter(|(_, (t, _))| *t <= now)
+            .map(|(&p, &(_, v))| (p, v))
+            .collect();
+        for (p, v) in due {
+            self.state.pending.remove(&p);
+            match self.grid.get(p) {
+                Block::WallTorch { .. } | Block::Torch { .. } => {
+                    self.state.torch_lit.insert(p, v);
+                }
+                Block::Repeater { .. } => {
+                    self.state.repeater_powered.insert(p, v);
+                }
+                _ => {}
+            }
+        }
+
+        let f = self.field();
+
+        // Re-evaluate every active component against the new field.
+        for i in 0..self.torches.len() {
+            let p = self.torches[i];
+            let support = self.torch_support(p);
+            let target = !f.block_powered(support);
+            self.schedule(p, target, self.state.torch_lit[&p], 1, now);
+        }
+        for i in 0..self.repeaters.len() {
+            let p = self.repeaters[i];
+            let (facing, delay) = match self.grid.get(p) {
+                Block::Repeater { facing, delay, .. } => (facing, delay.max(1) as u64),
+                _ => continue,
+            };
+            let target = self.repeater_input(p, facing, &f);
+            self.schedule(p, target, self.state.repeater_powered[&p], delay, now);
+        }
+    }
+
+    fn schedule(&mut self, p: Pos, target: bool, current: bool, delay: u64, now: u64) {
+        if target == current {
+            // The input went back to where it was before the change landed.
+            self.state.pending.remove(&p);
+        } else {
+            match self.state.pending.get(&p) {
+                Some(&(_, v)) if v == target => {} // already on its way
+                _ => {
+                    self.state.pending.insert(p, (now + delay, target));
+                }
+            }
+        }
+    }
+
+    /// Run until no transitions are pending, or `limit` ticks elapse.
+    /// Returns the number of ticks actually run and whether it settled.
+    pub fn run_until_stable(&mut self, limit: u64) -> (u64, bool) {
+        let start = self.state.tick;
+        for _ in 0..limit {
+            self.step();
+            if self.state.pending.is_empty() {
+                return (self.state.tick - start, true);
+            }
+        }
+        (self.state.tick - start, false)
+    }
+
+    pub fn run(&mut self, ticks: u64) {
+        for _ in 0..ticks {
+            self.step();
+        }
+    }
+
+    /// Read a lamp's lit state, which is how output ports are observed.
+    pub fn lamp_lit(&self, p: Pos) -> bool {
+        let f = self.field();
+        if f.block_powered(p) {
+            return true;
+        }
+        // A lamp also lights from adjacent dust directly.
+        for d in Dir::ALL {
+            if f.dust_at(offset(p, d)) > 0 {
+                return true;
+            }
+        }
+        f.dust_at(up(p)) > 0 || f.dust_at(down(p)) > 0
+    }
+}
+
+fn shape_conn(s: &crate::world::DustShape, d: Dir) -> Conn {
+    match d {
+        Dir::North => s.north,
+        Dir::South => s.south,
+        Dir::West => s.west,
+        Dir::East => s.east,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::{Face, Material};
+
+    /// A lever, a run of dust, and a lamp: checks seeding, decay, and readout.
+    #[test]
+    fn dust_decays_one_per_block() {
+        let mut g = Grid::new();
+        for z in 0..20 {
+            g.force((0, 0, z), Block::Solid(Material::Wire));
+            g.force((0, 1, z), Block::Dust { power: 0 });
+        }
+        g.force((0, 0, -1), Block::Solid(Material::Wire));
+        g.force((0, 1, -1), Block::Lever { face: Face::Floor, facing: Dir::North, powered: true });
+
+        let sim = Sim::new(&g);
+        let f = sim.field();
+        assert_eq!(f.dust_at((0, 1, 0)), 15);
+        assert_eq!(f.dust_at((0, 1, 1)), 14);
+        assert_eq!(f.dust_at((0, 1, 14)), 1);
+        // Level 1 dust does not propagate further: it dies out.
+        assert_eq!(f.dust_at((0, 1, 15)), 0);
+    }
+
+    /// The canonical inverter: dust on top of a block, torch on its side.
+    /// This single interaction is what every gate in the compiler is built from.
+    #[test]
+    fn torch_inverts_its_support_block() {
+        let mut g = Grid::new();
+        // Support block with dust on top.
+        g.force((0, 0, 0), Block::Solid(Material::Gate));
+        g.force((0, 1, 0), Block::Dust { power: 0 });
+        // Torch on the south face of the support.
+        g.force((0, 0, 1), Block::WallTorch { facing: Dir::South, lit: true });
+        // A lever feeding the input dust, initially off.
+        g.force((0, 0, -1), Block::Solid(Material::Wire));
+        g.force((0, 1, -1), Block::Lever { face: Face::Floor, facing: Dir::North, powered: false });
+
+        let mut sim = Sim::new(&g);
+        sim.run_until_stable(20);
+        assert!(sim.state.torch_lit[&(0, 0, 1)], "input low => torch lit");
+
+        sim.set_lever((0, 1, -1), true);
+        sim.run_until_stable(20);
+        assert!(!sim.state.torch_lit[&(0, 0, 1)], "input high => torch out");
+
+        sim.set_lever((0, 1, -1), false);
+        sim.run_until_stable(20);
+        assert!(sim.state.torch_lit[&(0, 0, 1)], "input low again => torch relit");
+    }
+
+    /// A lit torch strongly powers the block above it, which then drives dust.
+    #[test]
+    fn torch_strongly_powers_block_above() {
+        let mut g = Grid::new();
+        g.force((0, 0, 0), Block::Solid(Material::Gate));
+        g.force((0, 0, 1), Block::WallTorch { facing: Dir::South, lit: true });
+        g.force((0, 1, 1), Block::Solid(Material::Gate));
+        g.force((0, 2, 1), Block::Dust { power: 0 });
+
+        let sim = Sim::new(&g);
+        let f = sim.field();
+        assert!(f.block_strong((0, 1, 1)));
+        assert_eq!(f.dust_at((0, 2, 1)), 15);
+    }
+
+    /// Repeaters restore a decayed signal back to 15.
+    #[test]
+    fn repeater_restores_signal() {
+        let mut g = Grid::new();
+        for z in 0..14 {
+            g.force((0, 0, z), Block::Solid(Material::Wire));
+            g.force((0, 1, z), Block::Dust { power: 0 });
+        }
+        g.force((0, 0, -1), Block::Solid(Material::Wire));
+        g.force((0, 1, -1), Block::Lever { face: Face::Floor, facing: Dir::North, powered: true });
+        // Repeater reading from the north (from the dust run), driving south.
+        g.force((0, 0, 14), Block::Solid(Material::Wire));
+        g.force((0, 1, 14), Block::Repeater { facing: Dir::North, delay: 1, powered: false });
+        g.force((0, 0, 15), Block::Solid(Material::Wire));
+        g.force((0, 1, 15), Block::Dust { power: 0 });
+
+        let mut sim = Sim::new(&g);
+        sim.run_until_stable(20);
+        assert!(sim.state.repeater_powered[&(0, 1, 14)]);
+        assert_eq!(sim.field().dust_at((0, 1, 15)), 15);
+    }
+
+    /// Weak power must not leak onto dust: dust -> block -> dust is a dead end.
+    #[test]
+    fn weak_power_does_not_drive_dust() {
+        let mut g = Grid::new();
+        g.force((0, 0, 0), Block::Solid(Material::Wire));
+        g.force((0, 1, 0), Block::Lever { face: Face::Floor, facing: Dir::North, powered: true });
+        // Block to the south, with dust on top and dust beyond it.
+        g.force((0, 1, 1), Block::Solid(Material::Gate));
+        g.force((0, 1, 2), Block::Solid(Material::Wire));
+        g.force((0, 2, 2), Block::Dust { power: 0 });
+
+        let sim = Sim::new(&g);
+        let f = sim.field();
+        // The lever strongly powers its support, not the block to its side,
+        // so nothing should reach the far dust.
+        assert_eq!(f.dust_at((0, 2, 2)), 0);
+    }
+}
