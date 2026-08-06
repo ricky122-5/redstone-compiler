@@ -39,6 +39,20 @@ const STUB_LEN: i32 = 4;
 /// its torch, which congests immediately; a spine gives branches several places
 /// to leave from.
 const SPINE_LEN: i32 = 5;
+/// Largest vertical drop a single route may attempt.
+///
+/// Dust falls one block of Y per block of horizontal travel, and it cannot carry
+/// a repeater on the way down because a repeater cannot sit on a slope. So a
+/// descent of N costs N blocks of the 15-block signal budget with no chance to
+/// refresh: past roughly the budget itself, a one-shot descent is impossible on
+/// physics alone, and the only paths that exist switch back over themselves and
+/// break the slope. Anything deeper gets broken into relay stages.
+const MAX_DROP: i32 = 12;
+/// Z of the first relay stage, south of every gate spine.
+const RISER_Z0: i32 = 14;
+/// Z advance per relay stage. Must exceed MAX_DROP so each stage can descend
+/// monotonically instead of doubling back.
+const RISER_PITCH: i32 = 12;
 
 pub struct Layout {
     pub grid: Grid,
@@ -52,6 +66,24 @@ pub struct Layout {
 
 struct Placed {
     cell: NorCell,
+}
+
+/// Stamp a relay: a repeater with dust either side.
+///
+/// A relay is what makes a long descent possible. It restores the signal to
+/// full strength, so each stage gets its own budget, and it breaks the drop
+/// into pieces small enough that a monotonic path exists.
+fn stamp_relay(grid: &mut Grid, pos: Pos) -> Result<(Pos, Pos), String> {
+    let inp = (pos.0, pos.1, pos.2 - 1);
+    let out = (pos.0, pos.1, pos.2 + 1);
+    for p in [inp, pos, out] {
+        grid.set((p.0, p.1 - 1, p.2), Block::Solid(Material::Clock))?;
+    }
+    grid.set(inp, Block::Dust { power: 0 })?;
+    // Reads from the north, drives south: stages always run in +Z.
+    grid.set(pos, Block::Repeater { facing: Dir::North, delay: 1, powered: false })?;
+    grid.set(out, Block::Dust { power: 0 })?;
+    Ok((inp, out))
 }
 
 /// Assign every combinational signal a logic level: leaves at 0, each NOR one
@@ -135,8 +167,12 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     }
 
     // The routing volume: the gate rows plus generous free space around them.
-    let span = (widest + 8).max(32);
-    let depth = (gates.len() as i32).max(8) * 2 + 24;
+    // Room for the riser field: one private column per connection, plus enough
+    // Z for the deepest relay chain.
+    let max_stages = ((max_level + 2) * LEVEL_H / MAX_DROP) + 2;
+    let total_conns: i32 = gates.iter().map(|&g| net.operands(g).len() as i32).sum();
+    let span = (widest + 8 + 3 * total_conns.max(1)).max(32);
+    let depth = (gates.len() as i32).max(8) * 2 + 24 + RISER_Z0 + max_stages * RISER_PITCH;
     let bounds = (
         (-8, -(max_level + 1) * LEVEL_H - 8, GATE_Z - depth),
         (span, lever_y + 4, GATE_Z + depth),
@@ -224,6 +260,10 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         }
     }
 
+    // Riser field: private columns for relay chains, east of every gate.
+    let riser_x0 = widest + 4;
+    let mut riser_col = 0i32;
+
     // Route every fan-in connection. Deterministic order keeps builds stable.
     let mut work: Vec<Sig> = gates.clone();
     work.sort_by_key(|&g| (level[g as usize], g));
@@ -236,8 +276,35 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             // Worst case the branch leaves from the far end of the spine, so
             // charge the planner for the whole thing.
             let decay = sources.len() as i32 - 1;
+
+            // Break a deep drop into stages, each landing on a relay.
+            let top = sources[0].1;
+            let drop = top - feed.1;
+            let stages = if drop > MAX_DROP { (drop + MAX_DROP - 1) / MAX_DROP } else { 1 };
+
+            let mut from: Vec<Pos> = sources.clone();
+            let mut carry = decay;
+            for stage in 1..stages {
+                let rx = riser_x0 + 3 * riser_col;
+                let rz = RISER_Z0 + (stage - 1) * RISER_PITCH;
+                let ry = top - stage * (drop / stages);
+                let (rin, rout) = stamp_relay(&mut grid, (rx, ry, rz))?;
+                router.claim(rin, src);
+                router.claim(rout, src);
+                router.block((rx, ry, rz));
+                router
+                    .route(&mut grid, src, &from, rin, bounds, Material::Wire, carry)
+                    .map_err(|e| {
+                        format!("relay stage {stage} for net {src} into gate {g} input {j}: {e}")
+                    })?;
+                from = vec![rout];
+                carry = 0;
+            }
+            if stages > 1 {
+                riser_col += 1;
+            }
             router
-                .route(&mut grid, src, sources, feed, bounds, Material::Wire, decay)
+                .route(&mut grid, src, &from, feed, bounds, Material::Wire, carry)
                 .map_err(|e| format!("routing net {src} into gate {g} input {j}: {e}"))?;
         }
     }
@@ -375,7 +442,6 @@ mod tests {
     // repeater at each, so no single route ever spans the whole depth. Left as a
     // failing specification rather than deleted.
     #[test]
-    #[ignore = "deep descents need per-level relay points; see comment above"]
     fn three_input_logic_lays_out_and_runs() {
         check(|n, i| n.maj3(i[0], i[1], i[2]), 3);
         check(|n, i| n.xor3(i[0], i[1], i[2]), 3);

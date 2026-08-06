@@ -125,6 +125,13 @@ its own, and how they are handled:
 - **Repeaters.** A cheapest path is often a pure staircase with nowhere flat to
   refresh the signal.
 
+Deep drops are handled by **relay staging** rather than by the router. A descent
+of N blocks costs N of the 15-block signal budget with no chance to refresh,
+since a repeater cannot sit on a slope; past roughly the budget itself a one-shot
+descent is impossible on physics alone. So a drop deeper than `MAX_DROP` is split
+into stages, each landing on a relay repeater that restores full strength and
+gives the next stage a fresh budget.
+
 All three are handled by rip-up and retry: find a path, check it, and on failure
 bar the offending cell and search again, escalating a slope penalty in parallel
 to push routes toward flat runs.
@@ -154,7 +161,7 @@ deliberately not (sub-tick update ordering, torch burnout, quasi-connectivity) �
 the generated circuits are synchronous and clocked well below those thresholds.
 
 ```sh
-cargo test        # 96 tests (1 ignored: see Status)
+cargo test        # 96 tests
 ```
 
 ## Status — what works and what doesn't
@@ -167,26 +174,27 @@ cargo test        # 96 tests (1 ignored: see Status)
 - The redstone cell library: 1-, 2- and 4-input NOR truth tables, gate chaining,
   and automatic repeater insertion, all verified in the block simulator.
 - Sponge v3 schematic emission (gzip NBT, varint palette, baked dust shapes).
-- **Straight-line programs compile to placed, simulated, loadable redstone.**
+- **Straight-line programs compile to placed, simulated, loadable redstone**,
+  up to a few dozen gates. Inverters, AND/OR/XOR, 3-input majority and XOR all
+  place and are verified by simulating the emitted blocks.
 
 **Not done — the honest gap:**
 
-Programs with loops or branches synthesise to a *verified gate netlist* but not
-to placed redstone. Two things are missing:
-
-1. **Relay points for deep routes.** Dust descends one block of Y per block of
-   horizontal travel, and a repeater cannot sit on a slope. So a signal that
-   falls ~30 levels in one route needs ~30 blocks of horizontal room *and* flat
-   landings to refresh on. Beyond that the router finds only paths that switch
-   back over themselves, which silently breaks the slope. The fix is to break a
-   long descent into per-level hops with a repeater at each. The `#[ignore]`d
-   test in `src/layout.rs` is left as a failing specification.
+1. **Routing does not scale yet.** Small circuits place and simulate correctly,
+   but a real datapath does not. `examples/add.ohm` is 195 NOR gates and the
+   router exhausts its search budget partway through. Two causes, both fixable:
+   routes never share a path even between fanout branches of the same net (a
+   simplifying choice that costs a lot of area), and there is no global ordering
+   or congestion feedback — nets are routed in level order and early ones take
+   the good space. The standard answers are net ordering by criticality, shared
+   fanout trees, and congestion-driven rip-up across nets rather than within a
+   single route.
 2. **A flip-flop cell and clock spine.** Sequential designs need a physical
    D flip-flop macro and global clock distribution.
 
-So: `examples/gcd.ohm` produces a correct 724-gate netlist that simulates
-correctly at the gate level, but `-o out.schem` on it will tell you why it
-cannot be placed rather than emitting something broken.
+So `examples/gcd.ohm` produces a correct 724-gate netlist that simulates
+correctly at the gate level, but cannot yet be placed — and `-o` will tell you
+why rather than emitting something broken.
 
 ## Layout
 
