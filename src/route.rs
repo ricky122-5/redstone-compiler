@@ -100,9 +100,10 @@ impl PartialOrd for Frontier {
 
 impl Router {
     /// Seed the router from a grid that already contains placed cells.
-    /// Everything present becomes an obstacle; existing dust is attributed to
-    /// `preplaced` so cells do not短 to routes. Cell dust is given a distinct
-    /// owner per position so routes keep away from all of it.
+    ///
+    /// Everything present becomes an obstacle. Existing dust is additionally
+    /// attributed to [`PREPLACED`] so that keepout applies to it: a route
+    /// allowed to run alongside a gate's input pad would short into that gate.
     pub fn from_grid(grid: &Grid) -> Router {
         let mut r = Router {
             owner: HashMap::new(),
