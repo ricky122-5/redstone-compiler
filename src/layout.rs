@@ -125,20 +125,8 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     let mut grid = Grid::new();
     let mut placed: HashMap<Sig, Placed> = HashMap::new();
 
-    // Gates: one row per level, packed along X.
-    let mut col: HashMap<i32, i32> = HashMap::new();
-    let mut widest = 1;
-    for &g in &gates {
-        let k = net.operands(g).len().max(1);
-        let l = level[g as usize];
-        let x = *col.get(&l).unwrap_or(&0);
-        let cell = stamp_nor(&mut grid, (x, -l * LEVEL_H, GATE_Z), k)?;
-        col.insert(l, x + cell.width + GATE_GAP);
-        widest = widest.max(x + cell.width + GATE_GAP);
-        placed.insert(g, Placed { cell });
-    }
-
-    // Leaves: levers on their own row above level 0.
+    // Leaves first: levers on their own row above level 0. They are the
+    // drivers every level-1 gate is placed relative to.
     let mut source_of: HashMap<Sig, Pos> = HashMap::new();
     let mut leaves: Vec<Sig> = order
         .iter()
@@ -147,8 +135,9 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         .collect();
     leaves.sort();
     let lever_y = LEVEL_H;
+    let mut widest = 1;
     for (i, &s) in leaves.iter().enumerate() {
-        // Levers sit two apart so their dust taps cannot touch.
+        // Levers sit three apart so their dust taps cannot touch.
         let x = i as i32 * 3;
         let pos = (x, lever_y, GATE_Z - 4);
         let mat = if matches!(net.src(s), Src::One | Src::Zero) {
@@ -164,6 +153,52 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         grid.set(tap, Block::Dust { power: 0 })?;
         source_of.insert(s, tap);
         widest = widest.max(x + 3);
+    }
+
+    // Gates: one row per level, ordered within the row by the average X of the
+    // drivers feeding them.
+    //
+    // This is the "place" half of place-and-route, and skipping it is expensive.
+    // Packing gates in topological order scatters connected cells across the
+    // whole row, so every wire is long - which costs search time *and* fills
+    // space that later nets need. Barycenter ordering is the standard cheap
+    // heuristic: put each gate near whatever drives it. Because a level only
+    // depends on shallower levels, every driver is already placed by the time
+    // its consumers are ordered.
+    let mut by_level: HashMap<i32, Vec<Sig>> = HashMap::new();
+    for &g in &gates {
+        by_level.entry(level[g as usize]).or_default().push(g);
+    }
+    for l in 1..=max_level {
+        let Some(mut row) = by_level.remove(&l) else { continue };
+        row.sort_by_key(|&g| {
+            let xs: Vec<i64> = net
+                .operands(g)
+                .iter()
+                .filter_map(|&s| {
+                    placed
+                        .get(&s)
+                        .map(|p: &Placed| p.cell.out.0)
+                        .or_else(|| source_of.get(&s).map(|p| p.0))
+                })
+                .map(|x| x as i64)
+                .collect();
+            // Scaled mean, so ties break deterministically on gate id.
+            let bary = if xs.is_empty() {
+                i64::MAX / 2
+            } else {
+                xs.iter().sum::<i64>() * 1000 / xs.len() as i64
+            };
+            (bary, g)
+        });
+        let mut x = 0;
+        for g in row {
+            let k = net.operands(g).len().max(1);
+            let cell = stamp_nor(&mut grid, (x, -l * LEVEL_H, GATE_Z), k)?;
+            x += cell.width + GATE_GAP;
+            widest = widest.max(x);
+            placed.insert(g, Placed { cell });
+        }
     }
 
     // The routing volume: the gate rows plus generous free space around them.

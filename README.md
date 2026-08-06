@@ -181,14 +181,27 @@ cargo test        # 96 tests
 **Not done — the honest gap:**
 
 1. **Routing does not scale yet.** Small circuits place and simulate correctly,
-   but a real datapath does not. `examples/add.ohm` is 195 NOR gates and the
-   router exhausts its search budget partway through. Two causes, both fixable:
-   routes never share a path even between fanout branches of the same net (a
-   simplifying choice that costs a lot of area), and there is no global ordering
-   or congestion feedback — nets are routed in level order and early ones take
-   the good space. The standard answers are net ordering by criticality, shared
-   fanout trees, and congestion-driven rip-up across nets rather than within a
-   single route.
+   but a real datapath does not: `examples/add.ohm` is 195 NOR gates and the
+   router exhausts its search budget partway through.
+
+   Gates are now ordered within each row by the barycenter of their drivers,
+   which is the cheap half of placement and shortens wires — but it was not
+   enough on its own.
+
+   Shared fanout trees were tried and **reverted**. Letting a branch tap an
+   existing wire (inheriting that cell's recorded signal decay, so repeater
+   planning stays correct) is the right idea in isolation, but it fights relay
+   staging: a branch is free to tap high up the wire and inherit the full
+   descent again, which is exactly what staging exists to prevent. Restricting
+   taps to within one stage of the target did not recover the loss. Making the
+   two cooperate means teaching the router about staging directly rather than
+   bolting sharing on top.
+
+   What is actually missing is congestion feedback. Nets are routed in level
+   order, with no notion of criticality, and rip-up happens only *within* a
+   single route — so an early net can take the space a later one needs and
+   nothing ever reconsiders. Congestion-driven rip-up across nets is the
+   standard answer and the real next step.
 2. **A flip-flop cell and clock spine.** Sequential designs need a physical
    D flip-flop macro and global clock distribution.
 
