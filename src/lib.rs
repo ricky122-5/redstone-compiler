@@ -20,6 +20,7 @@ pub mod nbt;
 pub mod netlist;
 pub mod parser;
 pub mod redstone;
+pub mod route;
 pub mod schem;
 pub mod tech;
 pub mod world;

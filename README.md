@@ -84,7 +84,7 @@ multiplier, logarithmic barrel shifters. `a < b` reuses the adder — it is the
 complement of the carry-out of `a + !b + 1` — so comparisons share gates with
 nearby subtractions via hash-consing.
 
-### The cell geometry, and one bug worth reading about
+### The cell geometry, and two bugs worth reading about
 
 A gate's output emerges one level **below** its input. That asymmetry is forced,
 not chosen. The obvious layout puts the output dust on the block above the
@@ -94,10 +94,44 @@ pad one block away. The first version of this compiler built a beautiful,
 compact cell that was an oscillator. Taking the output from beside the torch
 instead costs one level of drop and keeps input and output isolated.
 
-Similarly, the opaque "roof" over each input pad is not decoration: without it
-the pad forms an up-slope connection to whatever is routed above it.
+The second bug is a better story about testing. Fan-in feed points originally sat
+in adjacent columns, so a gate's separate input nets were *shorted together* —
+and the 4-input NOR truth-table test passed anyway, because `NOR` of a shorted
+bus equals `NOR` of its members. The test could not distinguish a real 4-input
+gate from one input fed by a merged bus. It took the router refusing to place a
+two-input gate to surface it. There is now an explicit isolation test that fails
+on a shorted cell, which the truth table alone never would.
 
-Both facts are pinned by simulator tests in `src/tech.rs`.
+## Routing
+
+Levels are spaced apart in Y specifically to leave free layers between them,
+because **a crossing needs somewhere to cross**. An earlier floorplan packed
+levels one block apart so output and input planes lined up and all routing was
+horizontal; it was collision-free but could not express a crossing at all.
+
+Routes are found with A* over free space. Three things the search cannot see on
+its own, and how they are handled:
+
+- **Turns.** With all flat moves priced alike, a diagonal route degenerates into
+  a staircase of alternating X and Z steps. That path has no three collinear
+  nodes — and a repeater needs exactly that — so it cannot be kept alive over
+  distance. The search state therefore carries an incoming direction and prices
+  turns.
+- **Self-collision.** Every wire node claims three cells in its column: dust,
+  substrate below, clearance above. Two nodes in the same column must differ in
+  Y by at least three. The subtle case is a gap of exactly two, where the upper
+  node's substrate lands in the lower node's clearance and silently breaks the
+  slope that was meant to connect them.
+- **Repeaters.** A cheapest path is often a pure staircase with nowhere flat to
+  refresh the signal.
+
+All three are handled by rip-up and retry: find a path, check it, and on failure
+bar the offending cell and search again, escalating a slope penalty in parallel
+to push routes toward flat runs.
+
+Two nets can never touch, because the router refuses to place a wire adjacent to
+another net's wire. Shorts are structurally impossible rather than merely
+unlikely.
 
 ## Verification
 
@@ -120,7 +154,7 @@ deliberately not (sub-tick update ordering, torch burnout, quasi-connectivity) �
 the generated circuits are synchronous and clocked well below those thresholds.
 
 ```sh
-cargo test        # 91 tests (2 ignored: see Status)
+cargo test        # 96 tests (1 ignored: see Status)
 ```
 
 ## Status — what works and what doesn't
@@ -140,12 +174,13 @@ cargo test        # 91 tests (2 ignored: see Status)
 Programs with loops or branches synthesise to a *verified gate netlist* but not
 to placed redstone. Two things are missing:
 
-1. **A detailed router.** The current floorplan is collision-free by
-   construction for shallow logic, but multi-level nets eventually need to cross
-   one another and there is no spare Y layer to cross in — gates consume the
-   vertical budget. Doing this properly needs layer assignment plus rip-up and
-   retry. The two `#[ignore]`d tests in `src/layout.rs` are left in place as
-   failing specifications of the target behaviour rather than deleted.
+1. **Relay points for deep routes.** Dust descends one block of Y per block of
+   horizontal travel, and a repeater cannot sit on a slope. So a signal that
+   falls ~30 levels in one route needs ~30 blocks of horizontal room *and* flat
+   landings to refresh on. Beyond that the router finds only paths that switch
+   back over themselves, which silently breaks the slope. The fix is to break a
+   long descent into per-level hops with a repeater at each. The `#[ignore]`d
+   test in `src/layout.rs` is left as a failing specification.
 2. **A flip-flop cell and clock spine.** Sequential designs need a physical
    D flip-flop macro and global clock distribution.
 
@@ -163,5 +198,5 @@ cannot be placed rather than emitting something broken.
 | `netlist.rs` `bitblast.rs` | NOR netlist + gate-level simulator |
 | `redstone.rs` | Minecraft power semantics and block simulator |
 | `tech.rs` | redstone cell library |
-| `layout.rs` | placement and routing |
+| `layout.rs` `route.rs` | floorplan; 3D maze router with rip-up and retry |
 | `world.rs` `nbt.rs` `schem.rs` | block world, NBT writer, schematic emitter |

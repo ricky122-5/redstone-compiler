@@ -1,34 +1,44 @@
 //! Placement and routing: gate netlist -> a 3D block world.
 //!
-//! # Why this layout is collision-free by construction
+//! # Floorplan
 //!
-//! Rather than run a maze router and hope, the floorplan is chosen so that no
-//! two wires can ever occupy the same block. Four rules do all the work:
+//! Logic is levelised, and level `l` sits at `y = -l * LEVEL_H`. Every gate in
+//! a level is laid out along X at a fixed Z, so a level is one long row.
 //!
-//! 1. **Levels descend one block in Y.** A gate's output plane sits one level
-//!    below its input plane (see [`crate::tech`]), so placing logic level `l` at
-//!    `y = -l` makes every level-to-level hop *purely horizontal*. No ramps, and
-//!    every net in a given hop shares one Y plane.
-//! 2. **Every gate owns a private Z row.** All wiring destined for a gate runs
-//!    in that gate's own rows, so gates cannot interfere with each other.
-//! 3. **Every connection owns a private X column** in a bypass corridor placed
-//!    to the *left* of all gate columns. Vertical travel happens only there.
-//! 4. **Input `j` of a gate approaches on row `feed - j - 1` and turns at column
-//!    `gx(g, j)`, with columns increasing in `j`.** Because the corridor is to
-//!    the left, input `j`'s horizontal run stops at `gx(g, j)` and never reaches
-//!    the turn column of any later input. Earlier turns sit on different rows.
-//!    So a gate's own fan-in cannot self-collide either.
+//! `LEVEL_H` is the whole point. An earlier version packed levels one block
+//! apart so that a gate's output plane lined up exactly with the next level's
+//! input plane, making all routing purely horizontal. That was collision-free
+//! but could not express a *crossing*, and real netlists are full of them.
+//! Spacing levels apart leaves free Y layers between them, which is where
+//! crossings go. Minecraft allows 384 blocks of height and a level needs four,
+//! so the vertical budget is not a real constraint.
 //!
-//! The [`Grid`] still rejects overlapping placement, so any violation of the
-//! above surfaces as a hard error rather than a silently broken circuit.
+//! Everything between and around the level rows is free space that
+//! [`crate::route`] searches with A*. Keepout in the router guarantees two nets
+//! can never touch, so shorts are structurally impossible rather than merely
+//! unlikely.
 
 use crate::netlist::{Netlist, Sig, Src};
-use crate::tech::{plane, ramp_z, run_x, run_z, stamp_lamp, stamp_lever, stamp_nor, Budget, NorCell};
-use crate::world::{Grid, Material, Pos};
+use crate::route::Router;
+use crate::tech::{stamp_lamp, stamp_lever, stamp_nor, NorCell};
+use crate::world::{Block, Dir, Grid, Material, Pos};
 use std::collections::HashMap;
 
-/// Gap between the bypass corridor and the first gate column.
-const CORRIDOR_GAP: i32 = 2;
+/// Vertical pitch between logic levels. A cell body needs 4 (`y-1 ..= y+2`),
+/// so this leaves `LEVEL_H - 4` free Y layers between rows for crossings.
+const LEVEL_H: i32 = 6;
+/// Z of every gate row. Cells occupy `z-1 ..= z+2`, leaving the rest of Z open
+/// for routing.
+const GATE_Z: i32 = 0;
+/// Spare X columns between adjacent gates in a row.
+const GATE_GAP: i32 = 6;
+/// Length of the private approach lane in front of each gate input.
+const STUB_LEN: i32 = 4;
+/// Length of the output spine trailing each driver. A high-fanout gate would
+/// otherwise have to push every branch through the single cell of dust beside
+/// its torch, which congests immediately; a spine gives branches several places
+/// to leave from.
+const SPINE_LEN: i32 = 5;
 
 pub struct Layout {
     pub grid: Grid,
@@ -42,10 +52,6 @@ pub struct Layout {
 
 struct Placed {
     cell: NorCell,
-    /// Logic level, and therefore `y = -level`.
-    level: i32,
-    /// Z of the cell's input pad row.
-    row: i32,
 }
 
 /// Assign every combinational signal a logic level: leaves at 0, each NOR one
@@ -63,9 +69,9 @@ fn levelize(net: &Netlist, roots: &[Sig]) -> Vec<i32> {
 
 /// Place and route a purely combinational netlist.
 ///
-/// Returns an error if the netlist contains state, since flip-flops need a
-/// sequential floorplan (a clock spine and feedback routing) that this
-/// floorplan deliberately does not attempt.
+/// Returns an error if the netlist contains state: flip-flops need a sequential
+/// floorplan (a clock spine and flip-flop macro cells) that this does not
+/// attempt yet.
 pub fn build(net: &Netlist) -> Result<Layout, String> {
     if !net.dffs.is_empty() {
         return Err(format!(
@@ -84,153 +90,184 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         .collect();
     let max_level = gates.iter().map(|&g| level[g as usize]).max().unwrap_or(0);
 
-    // Rows: every gate gets a private Z band, sized to its fan-in. The band
-    // spans `row-2-fanin ..= row+3`: one approach lane per input below the
-    // cell, the cell itself, and one row above for the output tap.
-    let mut cursor: HashMap<i32, i32> = HashMap::new();
-    let mut row_of: HashMap<Sig, i32> = HashMap::new();
-    for &g in &gates {
-        let l = level[g as usize];
-        let k = fanin(net, g);
-        let c = cursor.entry(l).or_insert(0);
-        row_of.insert(g, *c + k + 3);
-        *c += k + 8;
-    }
-
-    // Columns: one per connection, in a corridor left of the gate area, plus
-    // one gate column per fan-in.
-    let total_fanin: i32 = gates.iter().map(|&g| fanin(net, g)).sum();
-    let corridor_width = total_fanin.max(1);
-    let gate_x0 = corridor_width + CORRIDOR_GAP;
-
     let mut grid = Grid::new();
     let mut placed: HashMap<Sig, Placed> = HashMap::new();
 
-    // Stamp every gate.
-    let mut next_gate_col = gate_x0;
+    // Gates: one row per level, packed along X.
+    let mut col: HashMap<i32, i32> = HashMap::new();
+    let mut widest = 1;
     for &g in &gates {
-        let k = fanin(net, g) as usize;
+        let k = net.operands(g).len().max(1);
         let l = level[g as usize];
-        let row = row_of[&g];
-        let base: Pos = (next_gate_col, -l, row);
-        let cell = stamp_nor(&mut grid, base, k)?;
-        next_gate_col += k as i32 + 1;
-        placed.insert(g, Placed { cell, level: l, row });
+        let x = *col.get(&l).unwrap_or(&0);
+        let cell = stamp_nor(&mut grid, (x, -l * LEVEL_H, GATE_Z), k)?;
+        col.insert(l, x + cell.width + GATE_GAP);
+        widest = widest.max(x + cell.width + GATE_GAP);
+        placed.insert(g, Placed { cell });
     }
 
-    // Primary inputs, reset and constants each get their own private Z row, in
-    // a column to the right of every gate. Sharing a row would make their
-    // leftward runs to the corridor overlap.
+    // Leaves: levers on their own row above level 0.
     let mut source_of: HashMap<Sig, Pos> = HashMap::new();
-    let mut input_levers: Vec<(String, Vec<Pos>)> = Vec::new();
-    let lever_col = next_gate_col + 4;
-
     let mut leaves: Vec<Sig> = order
         .iter()
         .copied()
         .filter(|&s| matches!(net.src(s), Src::Input { .. } | Src::Reset | Src::One | Src::Zero))
         .collect();
     leaves.sort();
+    let lever_y = LEVEL_H;
     for (i, &s) in leaves.iter().enumerate() {
-        let pos = (lever_col, plane::IN, -3 * (i as i32 + 2));
-        match net.src(s) {
-            Src::One | Src::Zero => {
-                // Constants are levers the build simply never toggles: cheaper
-                // and more legible in-game than a dedicated always-on gadget.
-                let on = matches!(net.src(s), Src::One);
-                stamp_lever(&mut grid, pos, Material::Clock, on)?;
-            }
-            _ => stamp_lever(&mut grid, pos, Material::PortIn, false)?,
-        }
-        source_of.insert(s, pos);
-    }
-
-    // Route every fan-in connection.
-    let mut corridor_col = 0;
-    for &g in &gates {
-        let inputs: Vec<Sig> = net.operands(g).to_vec();
-        let (grow, glevel) = {
-            let p = &placed[&g];
-            (p.row, p.level)
+        // Levers sit two apart so their dust taps cannot touch.
+        let x = i as i32 * 3;
+        let pos = (x, lever_y, GATE_Z - 4);
+        let mat = if matches!(net.src(s), Src::One | Src::Zero) {
+            Material::Clock
+        } else {
+            Material::PortIn
         };
-        for (j, &src) in inputs.iter().enumerate() {
-            let feed = placed[&g].cell.feeds[j];
-            let turn_x = feed.0;
-            // Approach row: one per input, below the feed row and ordered so
-            // that later inputs approach on lower rows.
-            let approach_z = grow - 2 - (j as i32 + 1);
-            let bx = corridor_col;
-            corridor_col += 1;
+        let on = matches!(net.src(s), Src::One);
+        stamp_lever(&mut grid, pos, mat, on)?;
+        // A dust node beside the lever gives the router something to start from.
+        let tap = (x, lever_y, GATE_Z - 3);
+        grid.set((tap.0, tap.1 - 1, tap.2), Block::Solid(mat))?;
+        grid.set(tap, Block::Dust { power: 0 })?;
+        source_of.insert(s, tap);
+        widest = widest.max(x + 3);
+    }
 
-            // Where does this signal come from, and at what Y?
-            let (src_pos, src_level) = match placed.get(&src) {
-                Some(p) => (p.cell.out, p.level),
-                None => (
-                    *source_of
-                        .get(&src)
-                        .ok_or_else(|| format!("signal {src} has no driver"))?,
-                    -1,
-                ),
-            };
+    // The routing volume: the gate rows plus generous free space around them.
+    let span = (widest + 8).max(32);
+    let depth = (gates.len() as i32).max(8) * 2 + 24;
+    let bounds = (
+        (-8, -(max_level + 1) * LEVEL_H - 8, GATE_Z - depth),
+        (span, lever_y + 4, GATE_Z + depth),
+    );
 
-            // One budget for the whole driver-to-sink path: the signal decays
-            // continuously across every segment below.
-            let mut budget = Budget::fresh();
-
-            // 1. From the driver, run left along its own row to the corridor.
-            let src_y = if src_level < 0 { plane::IN } else { -src_level + plane::OUT };
-            run_x(&mut grid, src_y, src_pos.2, src_pos.0, bx, Material::Wire, &mut budget)?;
-
-            // 2. Descend the corridor to the consumer's plane, then travel in Z
-            //    to the approach row. Both happen in this connection's private
-            //    column, so neither can collide with anything.
-            let dst_y = -glevel + plane::IN;
-            let mut z = src_pos.2;
-            if dst_y != src_y {
-                let step = if approach_z >= z { 1 } else { -1 };
-                z = ramp_z(&mut grid, bx, (src_y, z), dst_y, step, Material::Wire, &mut budget)?;
+    // Lamps are stamped before the router exists so their blocks are reserved.
+    // Otherwise a route lays substrate straight through where a lamp will go.
+    let lamp_y = -(max_level + 1) * LEVEL_H;
+    let mut lamp_pad: Vec<(String, Vec<(Sig, Pos, Pos)>)> = Vec::new();
+    {
+        let mut lamp_x = 0;
+        for (name, bits) in &net.outputs {
+            let mut v = Vec::new();
+            for &b in bits {
+                let pad = (lamp_x, lamp_y, GATE_Z + 4);
+                let lamp = (lamp_x, lamp_y, GATE_Z + 5);
+                grid.set((lamp.0, lamp.1 - 1, lamp.2), Block::Solid(Material::PortOut))?;
+                stamp_lamp(&mut grid, lamp)?;
+                v.push((b, pad, lamp));
+                lamp_x += 3;
             }
-            run_z(&mut grid, dst_y, bx, z, approach_z, Material::Wire, &mut budget)?;
-
-            // 3. Run right to the turn column, then up to the feed.
-            run_x(&mut grid, dst_y, approach_z, bx, turn_x, Material::Wire, &mut budget)?;
-            run_z(&mut grid, dst_y, turn_x, approach_z, feed.2, Material::Wire, &mut budget)?;
+            lamp_pad.push((name.clone(), v));
         }
     }
 
-    // Outputs: one lamp per bit, tapped off the driving gate's own row and run
-    // out to a column right of the whole build.
+    let mut router = Router::from_grid(&grid);
+    // Each signal is its own net. Its driver gets an output spine: a short dust
+    // run any of whose cells a branch may leave from.
+    let mut spine: HashMap<Sig, Vec<Pos>> = HashMap::new();
+    let mut drivers: Vec<(Sig, Pos)> = placed.iter().map(|(&s, p)| (s, p.cell.out)).collect();
+    drivers.extend(source_of.iter().map(|(&s, &p)| (s, p)));
+    drivers.sort();
+    for (s, out) in drivers {
+        let mut cells = vec![out];
+        router.claim(out, s);
+        for t in 1..=SPINE_LEN {
+            let p = (out.0, out.1, out.2 + t);
+            if !grid.is_free(p) || !grid.is_free((p.0, p.1 - 1, p.2)) {
+                break;
+            }
+            grid.set((p.0, p.1 - 1, p.2), Block::Solid(Material::Wire))?;
+            grid.set(p, Block::Dust { power: 0 })?;
+            router.claim(p, s);
+            cells.push(p);
+        }
+        spine.insert(s, cells);
+    }
+
+    // Give every gate input a private approach stub running north from its feed.
+    //
+    // Without this, the route serving one feed travels along the shared lane in
+    // front of the cell, and its keepout walls off the neighbouring feed - so a
+    // two-input gate becomes unroutable. Pre-placing the stub and claiming it
+    // for the driving net means each feed has a guaranteed private lane, and the
+    // router only has to reach the lane's far end, where there is open space.
+    let mut stub_entry: HashMap<(Sig, usize), Pos> = HashMap::new();
+    for &g in &gates {
+        for (j, &src) in net.operands(g).iter().enumerate() {
+            let f = placed[&g].cell.feeds[j];
+            // Dust lane, then a repeater at its far end. The repeater makes the
+            // stub a fresh 15-strength source, so the arriving route's signal
+            // budget and the stub's are independent - otherwise a route that
+            // only just made it would die in the last few blocks.
+            for t in 0..=STUB_LEN + 1 {
+                let p = (f.0, f.1, f.2 - t);
+                if grid.is_free(p) {
+                    grid.set((p.0, p.1 - 1, p.2), Block::Solid(Material::Wire))?;
+                    if t == STUB_LEN {
+                        grid.set(
+                            p,
+                            Block::Repeater { facing: Dir::North, delay: 1, powered: false },
+                        )?;
+                    } else {
+                        grid.set(p, Block::Dust { power: 0 })?;
+                    }
+                }
+                router.claim(p, src);
+                // Fence the lane so no other net can run alongside it.
+                router.block((p.0 - 1, p.1, p.2));
+                router.block((p.0 + 1, p.1, p.2));
+            }
+            // The repeater is not a wire node; routes terminate just past it.
+            router.block((f.0, f.1, f.2 - STUB_LEN));
+            stub_entry.insert((g, j), (f.0, f.1, f.2 - STUB_LEN - 1));
+        }
+    }
+
+    // Route every fan-in connection. Deterministic order keeps builds stable.
+    let mut work: Vec<Sig> = gates.clone();
+    work.sort_by_key(|&g| (level[g as usize], g));
+    for &g in &work {
+        for (j, &src) in net.operands(g).iter().enumerate() {
+            let feed = stub_entry[&(g, j)];
+            let sources = spine
+                .get(&src)
+                .ok_or_else(|| format!("signal {src} has no driver"))?;
+            // Worst case the branch leaves from the far end of the spine, so
+            // charge the planner for the whole thing.
+            let decay = sources.len() as i32 - 1;
+            router
+                .route(&mut grid, src, sources, feed, bounds, Material::Wire, decay)
+                .map_err(|e| format!("routing net {src} into gate {g} input {j}: {e}"))?;
+        }
+    }
+
+    // Outputs: route each bit out to the lamp reserved for it.
     let mut output_lamps: Vec<(String, Vec<Pos>)> = Vec::new();
-    let mut lamp_col = next_gate_col + 8;
-    for (name, bits) in &net.outputs {
+    for (name, entries) in &lamp_pad {
         let mut lamps = Vec::new();
-        for &b in bits {
-            let (src_pos, src_level) = match placed.get(&b) {
-                Some(p) => (p.cell.out, p.level),
-                None => (source_of[&b], -1),
-            };
-            let y = if src_level < 0 { plane::IN } else { -src_level + plane::OUT };
-            let tap_row = src_pos.2 + 1;
-            let mut budget = Budget::fresh();
-            run_z(&mut grid, y, src_pos.0, src_pos.2, tap_row, Material::PortOut, &mut budget)?;
-            run_x(&mut grid, y, tap_row, src_pos.0, lamp_col, Material::PortOut, &mut budget)?;
-            let lamp = (lamp_col + 1, y, tap_row);
-            stamp_lamp(&mut grid, lamp)?;
+        for &(b, pad, lamp) in entries {
+            let sources = &spine[&b];
+            let decay = sources.len() as i32 - 1;
+            router
+                .route(&mut grid, b, sources, pad, bounds, Material::PortOut, decay)
+                .map_err(|e| format!("routing output `{name}` to its lamp: {e}"))?;
             lamps.push(lamp);
-            lamp_col += 3;
         }
         output_lamps.push((name.clone(), lamps));
     }
 
-    // Map the netlist's input bits back to their levers, grouped by port.
+    // Group input levers by port for the caller.
     let mut by_port: HashMap<u32, Vec<(u32, Pos)>> = HashMap::new();
     for (&s, &pos) in &source_of {
         if let Src::Input { port, bit } = *net.src(s) {
-            by_port.entry(port).or_default().push((bit, pos));
+            // Report the lever itself, not the dust tap the router starts from.
+            by_port.entry(port).or_default().push((bit, (pos.0, pos.1, pos.2 - 1)));
         }
     }
     let mut ports: Vec<u32> = by_port.keys().copied().collect();
     ports.sort();
+    let mut input_levers = Vec::new();
     for p in ports {
         let mut v = by_port.remove(&p).unwrap();
         v.sort_by_key(|&(b, _)| b);
@@ -244,10 +281,6 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         levels: max_level as usize + 1,
         gates: gates.len(),
     })
-}
-
-fn fanin(net: &Netlist, g: Sig) -> i32 {
-    net.operands(g).len() as i32
 }
 
 #[cfg(test)]
@@ -324,15 +357,25 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs a detailed router: multi-level nets cannot cross yet"]
     fn two_input_gates_lay_out_and_run() {
         check(|n, i| n.and(i[0], i[1]), 2);
         check(|n, i| n.or(i[0], i[1]), 2);
         check(|n, i| n.xor(i[0], i[1]), 2);
     }
 
+    // Known limit: a primary input consumed at logic level 4+ has to fall ~30
+    // blocks in a single route. Dust descends one block of Y per block of
+    // horizontal travel, so that route needs ~30 blocks of horizontal room and
+    // must also interleave flat runs for repeaters, since a repeater cannot sit
+    // on a slope. The router finds paths but they switch back over themselves,
+    // which breaks the slope (see `route::first_conflict`), and cell-granularity
+    // rip-up cannot explore enough shapes to escape.
+    //
+    // The fix is relay points: break a long descent into per-level hops with a
+    // repeater at each, so no single route ever spans the whole depth. Left as a
+    // failing specification rather than deleted.
     #[test]
-    #[ignore = "needs a detailed router: multi-level nets cannot cross yet"]
+    #[ignore = "deep descents need per-level relay points; see comment above"]
     fn three_input_logic_lays_out_and_runs() {
         check(|n, i| n.maj3(i[0], i[1], i[2]), 3);
         check(|n, i| n.xor3(i[0], i[1], i[2]), 3);

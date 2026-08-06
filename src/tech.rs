@@ -67,6 +67,8 @@ pub struct NorCell {
     pub feeds: Vec<Pos>,
     /// The cell's output dust, at `plane::OUT`.
     pub out: Pos,
+    /// Columns the cell occupies in X, starting at its base.
+    pub width: i32,
 }
 
 /// Stamp a NOR cell with `fanin` inputs.
@@ -76,20 +78,29 @@ pub struct NorCell {
 pub fn stamp_nor(g: &mut Grid, base: Pos, fanin: usize) -> Result<NorCell, String> {
     let (x, y, z) = base;
     let fanin = fanin.max(1);
+    // Fan-in columns are spaced two apart. Adjacent feed points would be
+    // orthogonally adjacent dust, which conducts - so the gate's separate input
+    // nets would short together. The pad between them is deliberately continuous
+    // (it is one net), but the feeds must not touch.
+    let pitch = 2i32;
+    let pad_width = (fanin as i32 - 1) * pitch + 1;
     let mut feeds = Vec::with_capacity(fanin);
 
     for i in 0..fanin as i32 {
-        // Repeater row, one column per input, reading from the north and
-        // driving south into the pad.
-        g.set((x + i, y + plane::SUPPORT, z - 1), Block::Solid(Material::Wire))?;
+        let cx = x + i * pitch;
+        // Repeater row: reads from the north, drives south into the pad.
+        g.set((cx, y + plane::SUPPORT, z - 1), Block::Solid(Material::Wire))?;
         g.set(
-            (x + i, y + plane::IN, z - 1),
+            (cx, y + plane::IN, z - 1),
             Block::Repeater { facing: Dir::North, delay: 1, powered: false },
         )?;
-        // The driver must place dust here for the repeater to read.
-        feeds.push((x + i, y + plane::IN, z - 2));
+        // The driver must deliver dust here for the repeater to read.
+        feeds.push((cx, y + plane::IN, z - 2));
+    }
 
-        // Input pad: substrate, dust on top, opaque roof.
+    // Input pad: one continuous dust net across the full width, on substrate,
+    // sealed above by an opaque roof.
+    for i in 0..pad_width {
         g.set((x + i, y + plane::SUPPORT, z), Block::Solid(Material::Gate))?;
         g.set((x + i, y + plane::IN, z), Block::Dust { power: 0 })?;
         g.set((x + i, y + plane::ROOF, z), Block::Solid(Material::Shield))?;
@@ -102,7 +113,7 @@ pub fn stamp_nor(g: &mut Grid, base: Pos, fanin: usize) -> Result<NorCell, Strin
     g.set((x, y + plane::OUT - 1, z + 2), Block::Solid(Material::Gate))?;
     g.set((x, y + plane::OUT, z + 2), Block::Dust { power: 0 })?;
 
-    Ok(NorCell { feeds, out: (x, y + plane::OUT, z + 2) })
+    Ok(NorCell { feeds, out: (x, y + plane::OUT, z + 2), width: pad_width })
 }
 
 /// Tracks how far a signal has travelled since it was last restored to full
@@ -331,6 +342,31 @@ mod tests {
             settle(&mut sim);
             let high = sim.field().dust_at(cell.out) > 0;
             assert_eq!(high, !(a || b), "NOR({a}, {b})");
+        }
+    }
+
+    /// The fan-in feeds must be electrically separate. Without this the four
+    /// "inputs" merge into one shorted bus, and a NOR truth table still passes -
+    /// because NOR of a shorted bus equals NOR of its members. This test fails
+    /// on a shorted cell, where the truth table alone does not.
+    #[test]
+    fn fan_in_feeds_are_isolated_from_each_other() {
+        let mut g = Grid::new();
+        let cell = stamp_nor(&mut g, (0, 0, 0), 4).unwrap();
+        let levers: Vec<Pos> = cell.feeds.iter().map(|&f| drive(&mut g, f)).collect();
+
+        let mut sim = Sim::new(&g);
+        // Raise only the first input.
+        sim.set_lever(levers[0], true);
+        settle(&mut sim);
+        let f = sim.field();
+        assert!(f.dust_at(cell.feeds[0]) > 0, "driven feed should be live");
+        for i in 1..4 {
+            assert_eq!(
+                f.dust_at(cell.feeds[i]),
+                0,
+                "feed {i} must not pick up feed 0's signal"
+            );
         }
     }
 
