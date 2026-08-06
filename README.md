@@ -120,7 +120,7 @@ deliberately not (sub-tick update ordering, torch burnout, quasi-connectivity) â
 the generated circuits are synchronous and clocked well below those thresholds.
 
 ```sh
-cargo test        # 90 tests
+cargo test        # 91 tests (2 ignored: see Status)
 ```
 
 ## Status â€” what works and what doesn't
@@ -165,5 +165,3 @@ cannot be placed rather than emitting something broken.
 | `tech.rs` | redstone cell library |
 | `layout.rs` | placement and routing |
 | `world.rs` `nbt.rs` `schem.rs` | block world, NBT writer, schematic emitter |
-# redstone-compiler
-# redstone-compiler

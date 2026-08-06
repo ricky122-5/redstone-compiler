@@ -197,7 +197,17 @@ impl Netlist {
         self.or(a, b)
     }
 
-    /// Majority of three, the carry-out of a full adder.
+    /// Majority of three: the carry-out of a full adder.
+    ///
+    /// Written as an OR of ANDs. The tempting "optimisation" is the two-level
+    /// form `NOR(NOR(a,b), NOR(a,c), NOR(b,c))`, on the theory that each AND
+    /// costs two NOR levels so this costs four. Measured, it does not help:
+    /// `or_all` emits `not(nor(X))`, a single-input NOR that the *next* bit's
+    /// `not()` peephole strips for free, so the carry chain is already two
+    /// levels per bit either way. The two-level form saves exactly one level
+    /// across an entire adder and shares fewer subexpressions with the
+    /// surrounding datapath, which measured worse on real programs.
+    /// See `examples/depth_probe.rs`.
     pub fn maj3(&mut self, a: Sig, b: Sig, c: Sig) -> Sig {
         let ab = self.and(a, b);
         let ac = self.and(a, c);
