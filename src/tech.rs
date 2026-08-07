@@ -561,7 +561,7 @@ pub fn stamp_d_latch(
     let bounds = ((x - 40, y - 30, z - 40), (x + 140, y + 40, z + 9 * DZ + 40));
 
     // Each wire is its own net as far as the router is concerned.
-    let mut wire = |g: &mut Grid, r: &mut Router, net: u32, from: Pos, to: Pos| -> Result<(), String> {
+    let wire = |g: &mut Grid, r: &mut Router, net: u32, from: Pos, to: Pos| -> Result<(), String> {
         r.claim(from, net);
         r.claim(to, net);
         r.route(g, net, &[from], to, bounds, Material::Gate, 0)
@@ -646,7 +646,7 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<(Vec<Pos>, Vec<Pos>, Pos), S
 
     let mut router = Router::from_grid(g);
     let bounds = ((x - 60, y - 40, z - 60), (x + 200, y + 60, end_z(g) + 60));
-    let mut wire = |g: &mut Grid, r: &mut Router, net: u32, from: Pos, to: Pos| -> Result<(), String> {
+    let wire = |g: &mut Grid, r: &mut Router, net: u32, from: Pos, to: Pos| -> Result<(), String> {
         r.claim(from, net);
         r.claim(to, net);
         r.route(g, net, &[from], to, bounds, Material::Gate, 0)
