@@ -557,6 +557,18 @@ pub fn stamp_d_latch(
     let r_gate = stamp_nor(g, (x + 40, y, z + 4 * DZ), 2)?;
     let (set_feed, reset_feed, q, qn) = stamp_rs_latch(g, (x + 55, y, z + 6 * DZ))?;
 
+    // At rest the enable is low, so !E is high and both S = NOR(!D,!E) and
+    // R = NOR(D,!E) are low. Cells are stamped with their torch lit, which would
+    // have S and R *both* asserting - telling the latch to set and reset at
+    // once. That is not a state the latch can occupy, and it is what makes the
+    // enclosing loop ring. Start them where the logic says they belong.
+    for gate in [&s_gate, &r_gate] {
+        let torch = (gate.out.0, y + plane::SUPPORT, gate.out.2 - 1);
+        if matches!(g.get(torch), Block::WallTorch { .. }) {
+            g.force(torch, Block::WallTorch { facing: Dir::South, lit: false });
+        }
+    }
+
     let mut router = Router::from_grid(g);
     let bounds = ((x - 40, y - 30, z - 40), (x + 140, y + 40, z + 9 * DZ + 40));
 
@@ -899,13 +911,23 @@ mod tests {
     /// a body) were all solved machinery that already existed and was already
     /// validated in-game.
     ///
-    /// It oscillates instead, which is the RS latch's original failure one level
-    /// up: a feedback loop whose components do not start in agreement launches a
-    /// pulse that circulates forever. `stamp_rs_latch` pins its own loop, but a
-    /// D latch wraps more gates around that loop, and a flip-flop wraps two D
-    /// latches plus a clock inverter. Every torch and repeater enclosing a
-    /// feedback path has to start consistent with the state the loop is pinned
-    /// to, and only the innermost ring does today.
+    /// It oscillates instead. `examples/dff_debug.rs` names the culprits: the
+    /// **master's own RS latch ring** - the two cross-coupled torches - toggling
+    /// ~260 times in 400 ticks, plus two gates in the slave.
+    ///
+    /// That is the informative part. The same latch is stable on its own, and
+    /// stable inside a standalone D latch; it only rings once its Q drives a
+    /// spine and two long routed wires. So this is not the pinning bug that was
+    /// fixed before - the ring is pinned. Something about the added load or the
+    /// routed wires' initial state is disturbing it.
+    ///
+    /// Worth checking first, cheaply: whether the repeaters the router inserts
+    /// on Q's outgoing wires start unpowered while A drives high. That exact
+    /// inconsistency - a repeater relaying a high output while itself starting
+    /// low - is what launched the circulating pulse the first time, and the fix
+    /// then was to diff the grid across the call and initialise whatever routing
+    /// added. The same treatment may be needed on output wires, not just
+    /// feedback ones.
     #[test]
     #[ignore = "DFF places but oscillates; enclosing gates start inconsistent"]
     fn dff_samples_on_the_clock_edge() {
