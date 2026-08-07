@@ -557,6 +557,7 @@ mod tests {
     /// fan-in two per cell, separate Z bands so the feedback wires miss each
     /// other's outputs, and - the one that actually mattered - initialising the
     /// *whole loop* consistently rather than just the torches.
+    #[test]
     fn rs_latch_remembers() {
         let mut g = Grid::new();
         let (sf, rf, q, _qn) = stamp_rs_latch(&mut g, (0, 0, 0)).unwrap();
@@ -621,7 +622,7 @@ mod tests {
         let e2 = drive(&mut g, eb);
         let mut sim = Sim::new(&g);
 
-        let mut set = |sim: &mut Sim, d: bool, e: bool| {
+        let set = |sim: &mut Sim, d: bool, e: bool| {
             sim.set_lever(d1, d);
             sim.set_lever(d2, d);
             sim.set_lever(e1, e);
