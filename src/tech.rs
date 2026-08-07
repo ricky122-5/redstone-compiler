@@ -562,9 +562,24 @@ pub fn stamp_d_latch(
 /// same answer the main router uses for high-fanout drivers: several places to
 /// leave from rather than one.
 pub fn stamp_out_spine(g: &mut Grid, out: Pos, len: i32, mat: Material) -> Result<Vec<Pos>, String> {
+    stamp_out_spine_dir(g, out, len, (0, 1), mat)
+}
+
+/// A spine running in a chosen direction, given as `(dx, dz)`.
+///
+/// Direction matters: an RS latch's `q` has its own return wiring immediately
+/// behind it in Z, so a spine extended that way collides with the macro that
+/// produced it. Sideways is clear.
+pub fn stamp_out_spine_dir(
+    g: &mut Grid,
+    out: Pos,
+    len: i32,
+    dir: (i32, i32),
+    mat: Material,
+) -> Result<Vec<Pos>, String> {
     let mut cells = vec![out];
     for i in 1..=len {
-        let p = (out.0, out.1, out.2 + i);
+        let p = (out.0 + dir.0 * i, out.1, out.2 + dir.1 * i);
         g.set((p.0, p.1 - 1, p.2), Block::Solid(mat))?;
         g.set(p, Block::Dust { power: 0 })?;
         cells.push(p);
@@ -598,7 +613,10 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<(Vec<Pos>, Vec<Pos>, Pos), S
 
     // Master Q and the inverted clock each drive two slave inputs, so both need
     // somewhere to branch from.
-    let mq = stamp_out_spine(g, m_q, 3, Material::Gate)?;
+    // The latch's Q has its own feedback wiring behind it in Z, so its spine
+    // runs sideways into clear ground. The inverter's output has nothing behind
+    // it and can spine the usual way.
+    let mq = stamp_out_spine_dir(g, m_q, 3, (1, 0), Material::Gate)?;
     let nc = stamp_out_spine(g, not_clk.out, 3, Material::Gate)?;
 
     link_at(g, mq[0], s_da, y + 2, Material::Gate)?;
@@ -840,16 +858,20 @@ mod tests {
 
     /// A flip-flop must sample D on the clock edge and hold it, not follow D.
     ///
-    /// Currently fails to place: the master's Q spine runs into the RS latch's
-    /// own return wiring, because a latch's `q` is a cell output buried inside
-    /// the macro rather than a free-standing port with clear space in front of
-    /// it.
+    /// Currently fails to place. The Q spine now runs sideways rather than into
+    /// the latch's return wiring, which cleared the first collision, and the
+    /// next one is a link crossing the latch body further along.
     ///
-    /// The fix is a proper port discipline: a macro should hand back outputs
-    /// that already have room to branch, rather than raw cell outputs the caller
-    /// then has to extend into whatever happens to be next door. `stamp_d_latch`
-    /// should build the spine itself, in space it knows is free, and return
-    /// that.
+    /// Chasing these one at a time is the wrong approach and this is the second
+    /// instance. The real problem is that macros hand back **raw cell outputs**
+    /// and let the caller extend them into whatever happens to be adjacent. A
+    /// macro knows its own footprint; the caller does not. So each macro should
+    /// publish ports that already have room to branch, and declare the box it
+    /// occupies so a caller can place around it, instead of every composition
+    /// rediscovering the same collisions by trial.
+    ///
+    /// That is a small design change and it is the next thing to do, ahead of
+    /// any more geometry tuning.
     #[test]
     #[ignore = "DFF does not place: Q spine collides with latch internals"]
     fn dff_samples_on_the_clock_edge() {
