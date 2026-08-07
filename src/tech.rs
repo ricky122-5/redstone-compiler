@@ -604,12 +604,29 @@ pub fn stamp_out_spine_dir(
 pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<(Vec<Pos>, Vec<Pos>, Pos), String> {
     let (x, y, z) = base;
 
+    // Measure what each macro actually occupies rather than guessing an offset.
+    //
+    // Hand-picked offsets have failed twice here, each time because a link had
+    // to cross a body whose extent the caller could not see. A macro knows its
+    // own footprint; the caller does not. Diffing the grid's bounds across the
+    // call is the cheapest way to publish it.
+    let extent = |g: &Grid, before: Option<(Pos, Pos)>| -> (i32, i32) {
+        let (lo, hi) = g.bounds().unwrap();
+        let z0 = before.map(|(_, h)| h.2).unwrap_or(lo.2);
+        (z0, hi.2)
+    };
+
+    let b0 = g.bounds();
     let (m_da, m_db, m_ea, m_eb, m_q, _m_qn) = stamp_d_latch(g, (x, y, z))?;
+    let (_, master_end) = extent(g, b0);
 
-    // The slave runs on the inverted clock, so only one latch is ever open.
-    let not_clk = stamp_nor(g, (x + 70, y, z + 40), 1)?;
+    // Clear of the master, so links between the two have open ground.
+    const GAP: i32 = 24;
+    let not_clk = stamp_nor(g, (x + 70, y, master_end + GAP), 1)?;
 
-    let (s_da, s_db, s_ea, s_eb, s_q, _s_qn) = stamp_d_latch(g, (x + 90, y, z + 120))?;
+    let b1 = g.bounds();
+    let (s_da, s_db, s_ea, s_eb, s_q, _s_qn) =
+        stamp_d_latch(g, (x + 90, y, extent(g, b1).1 + GAP))?;
 
     // Master Q and the inverted clock each drive two slave inputs, so both need
     // somewhere to branch from.
@@ -619,10 +636,14 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<(Vec<Pos>, Vec<Pos>, Pos), S
     let mq = stamp_out_spine_dir(g, m_q, 3, (1, 0), Material::Gate)?;
     let nc = stamp_out_spine(g, not_clk.out, 3, Material::Gate)?;
 
-    link_at(g, mq[0], s_da, y + 2, Material::Gate)?;
-    link_at(g, mq[2], s_db, y + 4, Material::Gate)?;
-    link_at(g, nc[0], s_ea, y + 6, Material::Gate)?;
-    link_at(g, nc[2], s_eb, y + 8, Material::Gate)?;
+    // Links between macros must fly above them. A D latch's own wiring already
+    // reaches y+10 (five lanes at +2..+10 for its internal links), so anything
+    // routed lower crosses straight through the body it is trying to leave -
+    // which is what the last two collisions were.
+    link_at(g, mq[0], s_da, y + 14, Material::Gate)?;
+    link_at(g, mq[2], s_db, y + 17, Material::Gate)?;
+    link_at(g, nc[0], s_ea, y + 20, Material::Gate)?;
+    link_at(g, nc[2], s_eb, y + 23, Material::Gate)?;
 
     Ok((vec![m_da, m_db], vec![m_ea, m_eb, not_clk.feeds[0]], s_q))
 }
@@ -858,20 +879,23 @@ mod tests {
 
     /// A flip-flop must sample D on the clock edge and hold it, not follow D.
     ///
-    /// Currently fails to place. The Q spine now runs sideways rather than into
-    /// the latch's return wiring, which cleared the first collision, and the
-    /// next one is a link crossing the latch body further along.
+    /// Currently fails to place, but the failure has moved somewhere
+    /// informative. Three fixes landed: the Q spine runs sideways instead of
+    /// into the latch's return wiring, macros are placed using their measured
+    /// footprint rather than a guessed offset, and links between macros fly
+    /// above them at `y+14` and up, clear of the `y+2..y+10` lanes a latch uses
+    /// internally.
     ///
-    /// Chasing these one at a time is the wrong approach and this is the second
-    /// instance. The real problem is that macros hand back **raw cell outputs**
-    /// and let the caller extend them into whatever happens to be adjacent. A
-    /// macro knows its own footprint; the caller does not. So each macro should
-    /// publish ports that already have room to branch, and declare the box it
-    /// occupies so a caller can place around it, instead of every composition
-    /// rediscovering the same collisions by trial.
+    /// Departure is now clean. Arrival is not: the link descends onto its target
+    /// feed at that feed's own column, and on the way down it passes through the
+    /// destination macro's internal lanes - the same collision as before, in
+    /// reverse.
     ///
-    /// That is a small design change and it is the next thing to do, ahead of
-    /// any more geometry tuning.
+    /// So the port discipline needs to cover both ends. A macro must publish
+    /// *approach corridors* as well as output spines: a column beside each input
+    /// feed, clear from above, where a caller may descend. The main layout
+    /// already learned this - it is exactly the reserved landing zone that took
+    /// `add.ohm` from 40 routed connections to all 164.
     #[test]
     #[ignore = "DFF does not place: Q spine collides with latch internals"]
     fn dff_samples_on_the_clock_edge() {
