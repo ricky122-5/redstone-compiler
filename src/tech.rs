@@ -610,6 +610,7 @@ mod tests {
     /// seven-stage chain, so most of it is not propagating at all. Prime suspect
     /// is the long `run_z` that carries `not_e_s` forward past three other
     /// stages, straying close enough to power a pad it should not touch.
+    #[test]
     #[ignore = "D latch does not latch yet; S/R never assert - see comment"]
     fn d_latch_follows_then_holds() {
         let mut g = Grid::new();
