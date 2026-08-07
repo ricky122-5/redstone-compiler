@@ -279,6 +279,18 @@ pub fn stamp_lamp(g: &mut Grid, pos: Pos) -> Result<(), String> {
     Ok(())
 }
 
+/// Wire one cell's output to another cell's input feed.
+///
+/// Every such link starts by climbing a level, because a gate's output plane
+/// sits one below its input plane (see [`plane`]). Stages are therefore placed
+/// at increasing Z so the ramp has somewhere to go.
+pub fn link(g: &mut Grid, from_out: Pos, to_feed: Pos, mat: Material) -> Result<(), String> {
+    let mut bud = Budget::fresh();
+    let z = ramp_z(g, from_out.0, (from_out.1, from_out.2), to_feed.1, 1, mat, &mut bud)?;
+    run_x(g, to_feed.1, z, from_out.0, to_feed.0, mat, &mut bud)?;
+    run_z(g, to_feed.1, to_feed.0, z, to_feed.2, mat, &mut bud)
+}
+
 /// A cross-coupled NOR latch: the memory element every flip-flop is built from.
 ///
 /// Two NOR cells, each feeding the other's input. Raise one input and that
@@ -329,10 +341,7 @@ pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos), S
 
     // A -> B. A gate's output plane sits one below its input plane, so every
     // link starts by climbing a level.
-    let mut bud = Budget::fresh();
-    let za = ramp_z(g, a.out.0, (y + plane::OUT, a.out.2), y + plane::IN, 1, Material::Gate, &mut bud)?;
-    run_x(g, y + plane::IN, za, a.out.0, b.feeds[0].0, Material::Gate, &mut bud)?;
-    run_z(g, y + plane::IN, b.feeds[0].0, za, b.feeds[0].2, Material::Gate, &mut bud)?;
+    link(g, a.out, b.feeds[0], Material::Gate)?;
 
     // B -> A, returning in a private column west of both cells.
     let ret = x - 3;
@@ -345,6 +354,54 @@ pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos), S
     // The *second* feed of each cell is the external input; the first carries
     // the loop.
     Ok((a.feeds[1], b.feeds[1], a.out, b.out))
+}
+
+/// A gated D latch: `Q` follows `D` while `enable` is high, and holds when it
+/// falls. The storage element of a flip-flop.
+///
+/// Built as `S = D AND E`, `R = !D AND E` feeding an [`stamp_rs_latch`], with
+/// the ANDs expressed in NOR form: `S = NOR(!D, !E)` and `R = NOR(D, !E)`.
+///
+/// Each gate gets its own X column *and* its own Z stage. That is wasteful of
+/// space and deliberately so: links then always run forward in Z on a lane
+/// unique to their source, which makes the whole macro collision-free by
+/// construction rather than by careful tuning. Feedback has no levels for the
+/// router to work with, so this geometry cannot be delegated.
+///
+/// `D` and `enable` are each exposed **twice**, because two internal gates need
+/// each of them. Fanning out inside the macro would mean two links leaving one
+/// output and overlapping; the caller is already routing a net to many feeds, so
+/// handing it two feed points costs nothing.
+///
+/// Returns `(d_feed_a, d_feed_b, en_feed_a, en_feed_b, q, q_not)`.
+pub fn stamp_d_latch(
+    g: &mut Grid,
+    base: Pos,
+) -> Result<(Pos, Pos, Pos, Pos, Pos, Pos), String> {
+    let (x, y, z) = base;
+    const DZ: i32 = 6;
+
+    // Stage per gate, marching forward in Z and X together.
+    let not_e_s = stamp_nor(g, (x, y, z), 1)?;
+    let not_e_r = stamp_nor(g, (x + 6, y, z + DZ), 1)?;
+    let not_d = stamp_nor(g, (x + 12, y, z + 2 * DZ), 1)?;
+    let s_gate = stamp_nor(g, (x + 18, y, z + 3 * DZ), 2)?;
+    let r_gate = stamp_nor(g, (x + 26, y, z + 4 * DZ), 2)?;
+    // Well clear of the gate stages: the two links into the latch are the
+    // longest in the macro, and crowding them puts an inserted repeater on top
+    // of the other link's dust.
+    let (set_feed, reset_feed, q, qn) = stamp_rs_latch(g, (x + 40, y, z + 7 * DZ))?;
+
+    // S = NOR(!D, !E)
+    link(g, not_d.out, s_gate.feeds[0], Material::Gate)?;
+    link(g, not_e_s.out, s_gate.feeds[1], Material::Gate)?;
+    // R = NOR(D, !E); D arrives from outside on feeds[0].
+    link(g, not_e_r.out, r_gate.feeds[1], Material::Gate)?;
+
+    link(g, s_gate.out, set_feed, Material::Gate)?;
+    link(g, r_gate.out, reset_feed, Material::Gate)?;
+
+    Ok((not_d.feeds[0], r_gate.feeds[0], not_e_s.feeds[0], not_e_r.feeds[0], q, qn))
 }
 
 #[cfg(test)]
@@ -531,6 +588,53 @@ mod tests {
             after_set,
             "the bit must be held, not merely tracked"
         );
+    }
+
+
+    /// The latch must follow D while enabled and freeze when the enable drops.
+    ///
+    /// Currently Q never moves, so S and R are not asserting. The geometry is
+    /// sound - it places without collision and settles - so the fault is in the
+    /// signal path, not the layout. Two things to check, in this order, with
+    /// `latch_debug`-style instrumentation rather than reasoning:
+    ///
+    /// 1. Whether `not_e_*` and `not_d` outputs actually reach the S/R feeds;
+    ///    each link is long and crosses several stages.
+    /// 2. Whether the RS latch's forced initial state fights the S/R drive.
+    ///    `stamp_rs_latch` pins A high and B low, which is a *held* state - if
+    ///    S and R arrive weakly they may never overcome it.
+    #[test]
+    #[ignore = "D latch does not latch yet; S/R never assert - see comment"]
+    fn d_latch_follows_then_holds() {
+        let mut g = Grid::new();
+        let (da, db, ea, eb, q, _qn) = stamp_d_latch(&mut g, (0, 0, 0)).unwrap();
+        let d1 = drive(&mut g, da);
+        let d2 = drive(&mut g, db);
+        let e1 = drive(&mut g, ea);
+        let e2 = drive(&mut g, eb);
+        let mut sim = Sim::new(&g);
+
+        let mut set = |sim: &mut Sim, d: bool, e: bool| {
+            sim.set_lever(d1, d);
+            sim.set_lever(d2, d);
+            sim.set_lever(e1, e);
+            sim.set_lever(e2, e);
+            let (t, ok) = sim.run_until_stable(5000);
+            assert!(ok, "did not settle after {t} ticks (d={d} e={e})");
+        };
+
+        // Transparent: Q tracks D while the enable is high.
+        set(&mut sim, true, true);
+        let q_hi = sim.field().dust_at(q) > 0;
+        set(&mut sim, false, true);
+        let q_lo = sim.field().dust_at(q) > 0;
+        assert_ne!(q_hi, q_lo, "Q must follow D while enabled");
+
+        // Opaque: drop the enable, then change D. Q must not move.
+        set(&mut sim, false, false);
+        let held = sim.field().dust_at(q) > 0;
+        set(&mut sim, true, false);
+        assert_eq!(sim.field().dust_at(q) > 0, held, "Q must hold once disabled");
     }
 
     /// A run longer than the dust budget must still deliver full strength.

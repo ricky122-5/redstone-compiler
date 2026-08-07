@@ -312,7 +312,19 @@ cargo test        # 101 tests
      circulates forever. Real redstone damps it through torch burnout; a
      deterministic simulator rings indefinitely.
 
-   Remaining for the goal: gate the latch into a proper D flip-flop
-   (master–slave), distribute a clock, and teach the placer to treat flip-flops
-   as macros with a register bank.
+   `stamp_d_latch` gates it into a D latch — `S = NOR(!D,!E)`, `R = NOR(D,!E)`
+   feeding the RS pair. It places without collision and settles, but Q does not
+   move yet: S and R are not asserting. The geometry is sound, so the fault is
+   in the signal path. Test left in place and `#[ignore]`d.
+
+   Each gate there gets its own X column *and* Z stage — wasteful, deliberately.
+   Links then always run forward in Z on a lane unique to their source, which
+   makes the macro collision-free by construction rather than by tuning. `D` and
+   `enable` are exposed twice rather than fanned out internally, since two
+   internal gates need each and a caller routing a net to two feeds costs
+   nothing.
+
+   Remaining for the goal: make the D latch latch, pair two into a master–slave
+   flip-flop, distribute a clock, and teach the placer to treat flip-flops as
+   macros in a register bank.
 
