@@ -275,6 +275,23 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         spine.insert(s, cells);
     }
 
+    // Lamps must be kept clear of unrelated wiring. A powered block lights an
+    // adjacent lamp, so a route that merely passes nearby - laying substrate
+    // that some other signal energises - turns an output on regardless of what
+    // the circuit computed. Reserving a shell around each lamp for its own net
+    // is what makes a multi-bit result mean anything.
+    for (_, entries) in &lamp_pad {
+        for &(b, _, lamp) in entries {
+            for dx in -2..=2i32 {
+                for dy in -2..=2i32 {
+                    for dz in -2..=2i32 {
+                        router.reserve((lamp.0 + dx, lamp.1 + dy, lamp.2 + dz), b);
+                    }
+                }
+            }
+        }
+    }
+
     // Give every gate input a private approach stub running north from its feed.
     //
     // Without this, the route serving one feed travels along the shared lane in

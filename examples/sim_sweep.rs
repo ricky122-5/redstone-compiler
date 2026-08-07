@@ -16,12 +16,22 @@ fn main() {
     let levers: Vec<_> = lay.input_levers.iter().flat_map(|(_, v)| v.clone()).collect();
     let gsim = GateSim::new(&comb);
     let mut fails = 0;
+    let mut worst = 0u64;
+    // ONE simulator across every case, with the levers toggled between them -
+    // exactly how the real game is driven. Building a fresh Sim per case starts
+    // from a clean slate every time and so cannot observe latch-up: a circuit
+    // that answers correctly from reset but sticks once its inputs have moved
+    // looks perfect. That is precisely the failure the game showed.
+    let mut sim = Sim::new(&lay.grid);
     for v in 0..(1u64 << levers.len()) {
-        let mut sim = Sim::new(&lay.grid);
         for (i, &l) in levers.iter().enumerate() {
             sim.set_lever(l, (v >> i) & 1 == 1);
         }
-        let (_, stable) = sim.run_until_stable(2000);
+        let (ticks, stable) = sim.run_until_stable(4000);
+        worst = worst.max(ticks);
+        if ticks > 40 {
+            println!("  in={v:<3} settled after {ticks} redstone ticks ({:.1}s in game)", ticks as f64 * 0.1);
+        }
 
         // Split the flat counter across ports the same way `--truth` does.
         let mut vals = Vec::new();
@@ -43,5 +53,6 @@ fn main() {
             }
         }
     }
+    println!("worst-case settling: {worst} redstone ticks = {:.1}s in game", worst as f64 * 0.1);
     println!("{}", if fails == 0 { "layout simulates correctly".into() } else { format!("{fails} mismatch(es)") });
 }

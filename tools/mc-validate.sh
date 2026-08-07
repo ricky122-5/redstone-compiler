@@ -31,6 +31,14 @@ mkdir -p "$D"
 INFO=$("$OHMC" "$OHM" --mcfn "$D/circuit.mcfunction") || exit 1
 echo "$INFO"
 TRUTH=$("$OHMC" "$OHM" --truth) || exit 1
+# Settling time has to scale with the circuit, not be a fixed guess. Each NOR
+# cell is a repeater plus a torch (2 redstone ticks = 0.2s) and routing adds
+# more, so a deep circuit needs seconds. Too short and the probe reads a
+# half-propagated result, which looks exactly like a logic bug.
+DEPTH=$("$OHMC" "$OHM" --stats | sed -n 's/.*logic depth *\([0-9]*\).*/\1/p')
+DEPTH=${DEPTH:-8}
+SETTLE=$(( 4 + DEPTH / 2 ))
+echo "logic depth $DEPTH -> settling ${SETTLE}s per case"
 
 # Port coordinates, as reported by the compiler in the same frame as the
 # generated commands.
@@ -111,7 +119,7 @@ for v in $(seq 0 $((CASES-1))); do
     send "setblock $x $y $z minecraft:lever[face=floor,facing=north,powered=$st]" 0
     b=$((b+1))
   done <<< "$LEVERS"
-  sleep 3            # let the circuit settle
+  sleep "$SETTLE"    # let the circuit settle; scaled to logic depth above
   send "say OHMC_CASE $v" 1
   send "function ohm:probe" 2
 done

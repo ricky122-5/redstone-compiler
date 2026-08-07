@@ -149,6 +149,27 @@ fn main() {
         cases.push(Case { name: "nor_cell_input_high", lamp, expect: false });
     }
 
+    // 8. A lamp beside a block that has powered dust on top of it, with no dust
+    //    on the lamp itself. The game DOES light this: a powered block activates
+    //    adjacent mechanisms. So output lamps can be lit by unrelated wiring
+    //    passing nearby, and the layout must keep them clear rather than merely
+    //    drive them correctly.
+    {
+        x += PITCH;
+        source(&mut g, x);
+        g.force((x, -1, 0), Block::Solid(Material::Wire));
+        g.force((x, 0, 0), Block::Dust { power: 0 });
+        // Carry the signal one further so the dust is a line pointing into the
+        // block below-right, not a dot.
+        g.force((x, -1, 1), Block::Solid(Material::Wire));
+        g.force((x, 0, 1), Block::Dust { power: 0 });
+        // The lamp is a side neighbour of that powered substrate. Nothing sits
+        // on top of the lamp.
+        let lamp = (x + 1, -1, 1);
+        g.force(lamp, Block::Lamp { lit: false });
+        cases.push(Case { name: "lamp_beside_powered_block", lamp, expect: true });
+    }
+
     // --- our simulator's answer ---------------------------------------------
     let mut sim = Sim::new(&g);
     let (_, stable) = sim.run_until_stable(400);

@@ -200,10 +200,12 @@ an `.mcfunction` so the game can be asked the same questions. Each case
 exercises exactly one rule, so a disagreement names the rule instead of leaving
 you to bisect a whole circuit. All seven currently agree.
 
-One behaviour is deliberately **not** modelled: a weakly powered block lights an
-adjacent lamp. Output lamps sit directly under their wire, so they are powered
-head-on and this never bites — but a lamp placed next to a powered block would
-light in-game and not in the simulator. Worth fixing before lamps move.
+One case earns its place: `lamp_beside_powered_block`. A powered block lights an
+adjacent lamp — block powering activates mechanisms even though weak power never
+spreads onto dust. This was logged as an unmodelled behaviour on the assumption
+it could never bite, then measured against the game and found to be real. It is
+now modelled, and the layout reserves a shell around every output lamp so that
+unrelated wiring passing nearby cannot switch a result on.
 
 ```sh
 cargo test        # 101 tests
@@ -235,23 +237,36 @@ cargo test        # 101 tests
 
 **Not done — the honest gap:**
 
-1. **A multi-bit circuit disagrees with the real game.** `examples/add2.ohm`
-   (2-bit adder, 51 NOR gates) places, and the placed layout simulates
-   *correctly* in the block simulator for all 16 input combinations — but
-   Minecraft disagrees on 6 of them. The pattern is sharp: every case where
-   input `b[1]` is high reads 0.
+1. **A multi-bit circuit latches in the real game.** `examples/add2.ohm` (2-bit
+   adder) answers correctly in Minecraft from a freshly placed circuit — verified
+   directly, and its 316 powered dust cells match the simulator exactly. But once
+   its inputs have been toggled through a few states it sticks high and never
+   recovers. The simulator, driven the same way, does not stick.
 
-   ```sh
-   tools/mc-validate.sh examples/add2.ohm          # 6 of 16 MISMATCH
-   cargo run --release --example sim_sweep -- examples/add2.ohm   # all 16 ok
-   ```
+   Ruled out so far, each by measurement rather than argument:
 
-   Because the layout simulates correctly, this is not a placement bug — it is
-   our model of redstone diverging from the game somewhere the conformance suite
-   does not yet cover. That makes it the top priority: everything verified only
-   against the internal models inherits the doubt. The next step is to extend
-   `examples/conformance.rs` until one case reproduces it, rather than bisecting
-   a 1724-block circuit.
+   - *Wrong logic.* Every one of 316 powered dust cells matches the game.
+   - *Settling time.* Worst-case settling is 26 redstone ticks (2.6 s); the
+     validator now waits 4 s + depth/2.
+   - *Repeater side-locking.* A static scan finds 0 locking pairs among 89
+     repeaters.
+   - *Lamps lit by neighbours.* Real, and now both modelled and designed around
+     (see below), but not the cause here.
+
+   The leading suspect is **torch burnout**, which the simulator explicitly does
+   not model. A torch burns out after ~8 toggles in 60 game ticks and then stays
+   off, pinning its gate low. The original justification for skipping it — that
+   generated circuits are clocked well below that rate — is simply false for a
+   combinational circuit driven by hand, where a deep NOR network glitches
+   repeatedly as a wavefront passes.
+
+   Two methodology fixes came out of chasing this, both of which were hiding it:
+
+   - `sim_sweep` built a **fresh simulator per input**, so it began from a clean
+     slate every time and was structurally incapable of observing latch-up. It
+     now keeps one simulator and toggles levers between cases, as the game does.
+   - The validator's settling time was a fixed 3 s guess; it now scales with the
+     circuit's logic depth.
 
 2. **Routing scales further but not far enough.** `examples/add.ohm` (99 gates,
    164 connections) now places in full: 179x123x181, 24654 blocks. `alu.ohm`

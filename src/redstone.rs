@@ -32,9 +32,20 @@
 //! Minecraft does for all practical purposes.
 //!
 //! We deliberately do **not** model sub-tick update ordering, torch burnout, or
-//! quasi-connectivity. The generated circuits are synchronous and are clocked
-//! well below the burnout threshold, so those effects cannot be observed; this
-//! is an idealised but faithful model of the designs we actually emit.
+//! quasi-connectivity.
+//!
+//! **The justification for skipping burnout was wrong, and this is currently the
+//! leading suspect for a real divergence.** The original reasoning was that the
+//! generated circuits are synchronous and clocked well below the burnout
+//! threshold. That does not hold for combinational circuits driven by hand: a
+//! torch burns out after roughly eight toggles in 60 game ticks, and a deep NOR
+//! network with reconvergent paths glitches several times as a wavefront passes.
+//! A burned-out torch stays off, which in a NOR network pins its gate low.
+//!
+//! The symptom that points here: `examples/add2.ohm` answers correctly in-game
+//! from a freshly placed circuit, but latches once its inputs have been toggled
+//! through a few states - and this simulator, which has no burnout, never
+//! latches. See the README for what has been ruled out.
 
 use crate::world::{down, offset, up, Block, Conn, Dir, Grid, Pos};
 use std::collections::{HashMap, VecDeque};
@@ -416,18 +427,29 @@ impl<'g> Sim<'g> {
 
     /// Read a lamp's lit state, which is how output ports are observed.
     ///
-    /// A lamp lights when the block is *powered* - not merely when some powered
-    /// dust happens to sit next to it. Dust only powers the block beneath it and
-    /// the blocks it points into, and dust with a single connection renders as a
-    /// straight line along that one axis, so it does not point sideways at all.
+    /// A lamp lights when it is powered, **or when any block touching it is
+    /// powered**. That second clause is block powering: a powered block
+    /// activates adjacent mechanisms even though weak power never spreads onto
+    /// dust. Measured against the real game, not assumed - see the
+    /// `lamp_beside_powered_block` case in `examples/conformance.rs`.
     ///
-    /// An earlier version of this returned true for any adjacent powered dust.
-    /// That was wrong, and it hid a real bug: the compiler was placing output
-    /// lamps beside a wire whose shape pointed the other way, so the circuit
-    /// worked everywhere except its final block. Testing against the actual game
-    /// is what surfaced it.
+    /// Getting this wrong was subtle in both directions. An early version
+    /// returned true for any adjacent *powered dust*, which was too permissive
+    /// and hid a layout bug. Tightening it to "is this block powered" was
+    /// correct for a lamp driven head-on but too strict here, and made every
+    /// multi-bit output look right in simulation while unrelated wiring lit the
+    /// lamps in-game.
     pub fn lamp_lit(&self, p: Pos) -> bool {
-        self.field().block_powered(p)
+        let f = self.field();
+        if f.block_powered(p) {
+            return true;
+        }
+        for d in Dir::ALL {
+            if f.block_powered(offset(p, d)) {
+                return true;
+            }
+        }
+        f.block_powered(up(p)) || f.block_powered(down(p))
     }
 }
 
