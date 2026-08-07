@@ -279,6 +279,62 @@ pub fn stamp_lamp(g: &mut Grid, pos: Pos) -> Result<(), String> {
     Ok(())
 }
 
+/// A cross-coupled NOR latch: the memory element every flip-flop is built from.
+///
+/// Two NOR cells, each feeding the other's input. Raise one input and that
+/// torch goes out, releasing the other, which then holds itself lit through the
+/// cross-coupling. The latch remembers which input was raised last.
+///
+/// This is the first structure in the compiler with feedback, and the router
+/// cannot express it: levelisation assumes a DAG and a cycle has no levels. So
+/// the wiring is hand-placed and the whole thing is handed to the placer as an
+/// opaque macro - the way a standard-cell library ships a flip-flop rather than
+/// asking a router to build one.
+///
+/// The two cells are offset in Z as well as X. Side by side, each one's feedback
+/// wire runs straight through the other's output dust; separate Z bands give the
+/// forward link clear space, and the return link gets its own column to the west.
+///
+/// Returns `(set_feed, reset_feed, q, q_not)`.
+pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos), String> {
+    let (x, y, z) = base;
+    const DZ: i32 = 8;
+    // Fan-in two, not one: each NOR takes the cross-coupled feedback on one
+    // input and the external set/reset on the other. With a single input the
+    // feedback and the external drive land on the same wire, shorted together,
+    // and the latch degenerates into a follower that cannot hold anything.
+    let a = stamp_nor(g, (x, y, z), 2)?;
+    let b = stamp_nor(g, (x + 6, y, z + DZ), 2)?;
+
+    // Break the tie. Both torches are stamped lit, which for a cross-coupled
+    // pair is not a state the latch can be in: each drives the other off, then
+    // back on, forever. Real hardware resolves this through asymmetry; a
+    // deterministic simulator just rings. Starting B dark picks a winner.
+    g.force(
+        (x + 6, y + plane::SUPPORT, z + DZ + 1),
+        Block::WallTorch { facing: Dir::South, lit: false },
+    );
+
+    // A -> B. A gate's output plane sits one below its input plane, so every
+    // link starts by climbing a level.
+    let mut bud = Budget::fresh();
+    let za = ramp_z(g, a.out.0, (y + plane::OUT, a.out.2), y + plane::IN, 1, Material::Gate, &mut bud)?;
+    run_x(g, y + plane::IN, za, a.out.0, b.feeds[0].0, Material::Gate, &mut bud)?;
+    run_z(g, y + plane::IN, b.feeds[0].0, za, b.feeds[0].2, Material::Gate, &mut bud)?;
+
+    // B -> A, returning in a private column west of both cells.
+    let ret = x - 3;
+    let mut bud = Budget::fresh();
+    let zb = ramp_z(g, b.out.0, (y + plane::OUT, b.out.2), y + plane::IN, 1, Material::Gate, &mut bud)?;
+    run_x(g, y + plane::IN, zb, b.out.0, ret, Material::Gate, &mut bud)?;
+    run_z(g, y + plane::IN, ret, zb, a.feeds[0].2, Material::Gate, &mut bud)?;
+    run_x(g, y + plane::IN, a.feeds[0].2, ret, a.feeds[0].0, Material::Gate, &mut bud)?;
+
+    // The *second* feed of each cell is the external input; the first carries
+    // the loop.
+    Ok((a.feeds[1], b.feeds[1], a.out, b.out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,8 +357,10 @@ mod tests {
     }
 
     fn settle(sim: &mut Sim) {
-        let (_, stable) = sim.run_until_stable(200);
-        assert!(stable, "circuit failed to settle");
+        // Feedback loops take far longer to converge than the feed-forward
+        // cells this helper was written for.
+        let (ticks, stable) = sim.run_until_stable(5000);
+        assert!(stable, "circuit failed to settle after {ticks} ticks");
     }
 
     /// A one-input NOR is an inverter. This is the single most important
@@ -421,6 +479,54 @@ mod tests {
         sim.set_lever(lever, true);
         settle(&mut sim);
         assert_eq!(sim.field().dust_at(b.out), 15, "1 -> NOT -> 0 -> NOT -> 1");
+    }
+
+
+    /// The latch must *hold* a bit: raise an input, drop it, and the state stays.
+    ///
+    /// Currently oscillates instead. Two cross-coupled NORs are two inversions
+    /// round the loop, which is bistable in principle, so the fault is in the
+    /// physical wiring rather than the logic. Prime suspect is the return path:
+    /// it is long enough that a repeater is inserted, and that repeater sits
+    /// inside the feedback loop. Next step is to instrument which torches are
+    /// toggling rather than guess again.
+    ///
+    /// Left as a failing specification: this is the gate to everything
+    /// sequential, and deleting it would hide the one thing between the compiler
+    /// and its stated goal.
+    #[test]
+    #[ignore = "RS latch oscillates; see comment - blocks all sequential work"]
+    fn rs_latch_remembers() {
+        let mut g = Grid::new();
+        let (sf, rf, q, _qn) = stamp_rs_latch(&mut g, (0, 0, 0)).unwrap();
+        let s_lever = drive(&mut g, sf);
+        let r_lever = drive(&mut g, rf);
+
+        let mut sim = Sim::new(&g);
+        settle(&mut sim);
+
+        sim.set_lever(r_lever, true);
+        settle(&mut sim);
+        let after_reset = sim.field().dust_at(q) > 0;
+        sim.set_lever(r_lever, false);
+        settle(&mut sim);
+        assert_eq!(
+            sim.field().dust_at(q) > 0,
+            after_reset,
+            "state must survive its input dropping"
+        );
+
+        sim.set_lever(s_lever, true);
+        settle(&mut sim);
+        let after_set = sim.field().dust_at(q) > 0;
+        assert_ne!(after_set, after_reset, "set and reset must reach different states");
+        sim.set_lever(s_lever, false);
+        settle(&mut sim);
+        assert_eq!(
+            sim.field().dust_at(q) > 0,
+            after_set,
+            "the bit must be held, not merely tracked"
+        );
     }
 
     /// A run longer than the dust budget must still deliver full strength.

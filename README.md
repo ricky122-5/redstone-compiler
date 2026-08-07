@@ -286,8 +286,26 @@ cargo test        # 101 tests
    within a single route, so an early net can take space a later one needs and
    nothing reconsiders.
 
-3. **A flip-flop cell and clock spine.** Sequential designs need a physical
-   D flip-flop macro and global clock distribution.
+3. **A flip-flop cell and clock spine — started, not working.** This is the only
+   thing between the compiler and its goal of running `gcd.ohm` in Minecraft.
+
+   `stamp_rs_latch` in `src/tech.rs` builds the memory element every flip-flop
+   needs: two cross-coupled NOR cells. It is the first structure in the project
+   with feedback, which the router cannot express at all — levelisation assumes a
+   DAG and a cycle has no levels — so it is hand-placed and handed to the placer
+   as an opaque macro, the way a standard-cell library ships a flip-flop.
+
+   Three real constraints surfaced while building it, all now handled:
+   each NOR needs **fan-in two** (feedback on one input, external set/reset on
+   the other, or the two short together); the two cells need **separate Z bands**
+   (side by side, each one's feedback runs through the other's output); and the
+   pair must **start in a defined state** (both torches lit is not a state a
+   cross-coupled pair can occupy).
+
+   It still oscillates. Two inversions round the loop is bistable in principle,
+   so the fault is in the wiring, not the logic — most likely the repeater that
+   gets inserted into the long return path. The test is left in place and
+   `#[ignore]`d as a failing specification.
 
 So `examples/gcd.ohm` produces a correct 724-gate netlist that simulates
 correctly at the gate level, but cannot yet be placed — and `-o` will tell you
