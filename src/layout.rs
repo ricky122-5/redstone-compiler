@@ -77,7 +77,15 @@ fn stamp_relay(grid: &mut Grid, pos: Pos) -> Result<(Pos, Pos), String> {
     let inp = (pos.0, pos.1, pos.2 - 1);
     let out = (pos.0, pos.1, pos.2 + 1);
     for p in [inp, pos, out] {
-        grid.set((p.0, p.1 - 1, p.2), Block::Solid(Material::Clock))?;
+        // Reuse whatever solid block is already there. Relays are stamped while
+        // routing is in progress, so an earlier route may already have laid
+        // substrate through this column.
+        let sub = (p.0, p.1 - 1, p.2);
+        if grid.is_free(sub) {
+            grid.set(sub, Block::Solid(Material::Clock))?;
+        } else if !grid.get(sub).is_opaque() {
+            return Err(format!("relay at {pos:?} has no solid footing at {sub:?}"));
+        }
     }
     grid.set(inp, Block::Dust { power: 0 })?;
     // Reads from the north, drives south: stages always run in +Z.
@@ -300,53 +308,110 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         }
     }
 
-    // Riser field: private columns for relay chains, east of every gate.
-    let riser_x0 = widest + 4;
-    let mut riser_col = 0i32;
+    // Relay chains live in their destination's own column, so each column needs
+    // its own allocator: two gates at the same X on different levels would
+    // otherwise stack their chains on top of each other.
+    let mut riser_slot: HashMap<i32, i32> = HashMap::new();
+    let stage_band = max_stages * RISER_PITCH + 8;
 
-    // Route every fan-in connection. Deterministic order keeps builds stable.
-    let mut work: Vec<Sig> = gates.clone();
-    work.sort_by_key(|&g| (level[g as usize], g));
-    for &g in &work {
+    // Route every fan-in connection, hardest first.
+    //
+    // Order matters more than it looks. Routing in level order does the short
+    // local nets first, and their keepout then walls off the long ones that had
+    // far fewer options to begin with - so the hardest net is attempted last,
+    // into the most crowded space. Sorting by descending difficulty gives the
+    // constrained nets first pick, which is the cheap half of what a real
+    // congestion-negotiating router does.
+    //
+    // Difficulty is estimated as the driver-to-sink distance, dominated by the
+    // vertical drop since that is what forces relay staging.
+    let mut work: Vec<(Sig, usize, Sig, i64)> = Vec::new();
+    for &g in &gates {
         for (j, &src) in net.operands(g).iter().enumerate() {
             let feed = stub_entry[&(g, j)];
-            let sources = spine
+            let from = spine
                 .get(&src)
+                .and_then(|v| v.first().copied())
                 .ok_or_else(|| format!("signal {src} has no driver"))?;
-            // Worst case the branch leaves from the far end of the spine, so
-            // charge the planner for the whole thing.
-            let decay = sources.len() as i32 - 1;
-
-            // Break a deep drop into stages, each landing on a relay.
-            let top = sources[0].1;
-            let drop = top - feed.1;
-            let stages = if drop > MAX_DROP { (drop + MAX_DROP - 1) / MAX_DROP } else { 1 };
-
-            let mut from: Vec<Pos> = sources.clone();
-            let mut carry = decay;
-            for stage in 1..stages {
-                let rx = riser_x0 + 3 * riser_col;
-                let rz = RISER_Z0 + (stage - 1) * RISER_PITCH;
-                let ry = top - stage * (drop / stages);
-                let (rin, rout) = stamp_relay(&mut grid, (rx, ry, rz))?;
-                router.claim(rin, src);
-                router.claim(rout, src);
-                router.block((rx, ry, rz));
-                router
-                    .route(&mut grid, src, &from, rin, bounds, Material::Wire, carry)
-                    .map_err(|e| {
-                        format!("relay stage {stage} for net {src} into gate {g} input {j}: {e}")
-                    })?;
-                from = vec![rout];
-                carry = 0;
-            }
-            if stages > 1 {
-                riser_col += 1;
-            }
-            router
-                .route(&mut grid, src, &from, feed, bounds, Material::Wire, carry)
-                .map_err(|e| format!("routing net {src} into gate {g} input {j}: {e}"))?;
+            let dist = (from.0 - feed.0).abs() as i64
+                + (from.2 - feed.2).abs() as i64
+                + 3 * (from.1 - feed.1).abs() as i64;
+            work.push((g, j, src, dist));
         }
+    }
+    // Descending difficulty; gate and input index break ties so builds stay
+    // byte-identical across runs.
+    work.sort_by_key(|&(g, j, _, dist)| (std::cmp::Reverse(dist), g, j));
+
+    let total_conns = work.len();
+    let mut routed = 0usize;
+    for &(g, j, src, _) in &work {
+        let feed = stub_entry[&(g, j)];
+        let sources = spine
+            .get(&src)
+            .ok_or_else(|| format!("signal {src} has no driver"))?;
+        // Worst case the branch leaves from the far end of the spine, so
+        // charge the planner for the whole thing.
+        let decay = sources.len() as i32 - 1;
+
+        // Break a deep drop into stages, each landing on a relay.
+        let top = sources[0].1;
+        let drop = top - feed.1;
+        let stages = if drop > MAX_DROP { (drop + MAX_DROP - 1) / MAX_DROP } else { 1 };
+
+        let mut from: Vec<Pos> = sources.clone();
+        let mut carry = decay;
+        // Relay chains step from the driver toward the sink, so every hop is
+        // short in X as well as Y. Parking the whole chain at either end just
+        // moves the long hop to the other side: with it at the destination the
+        // first stage spans the build, with it at the source the last one does.
+        let src_x = sources[0].0;
+        let chain_x: Vec<i32> = (1..stages)
+            .map(|s| src_x + (feed.0 - src_x) * s / stages)
+            .collect();
+        // A Z band per chain, since two chains can share a column.
+        let slot = if stages > 1 {
+            let key = *chain_x.first().unwrap_or(&feed.0);
+            let s = riser_slot.entry(key).or_insert(0);
+            let v = *s;
+            *s += 1;
+            v
+        } else {
+            0
+        };
+        for stage in 1..stages {
+            // Put the relay chain in the destination's own column. Parking it in
+            // a shared riser field far away made the *final* hop span the whole
+            // build - which is why routing failed on the very first connection,
+            // with an empty grid and no congestion at all. Descending above the
+            // gate that consumes the signal keeps every hop short.
+            //
+            // Inputs of one gate are two columns apart, so their chains are
+            // separated in Z instead, keeping them clear of each other's keepout.
+            let rx = chain_x[(stage - 1) as usize];
+            let rz = RISER_Z0 + slot * stage_band + (stage - 1) * RISER_PITCH;
+            let ry = top - stage * (drop / stages);
+            let (rin, rout) = stamp_relay(&mut grid, (rx, ry, rz))?;
+            router.claim(rin, src);
+            router.claim(rout, src);
+            router.block((rx, ry, rz));
+            router
+                .route(&mut grid, src, &from, rin, bounds, Material::Wire, carry)
+                .map_err(|e| {
+                    format!("relay stage {stage} for net {src} into gate {g} input {j}: {e}")
+                })?;
+            from = vec![rout];
+            carry = 0;
+        }
+        router
+            .route(&mut grid, src, &from, feed, bounds, Material::Wire, carry)
+            .map_err(|e| {
+                format!(
+                    "routing net {src} into gate {g} input {j}: {e}\n\
+                     note: {routed} of {total_conns} connections routed before this one failed"
+                )
+            })?;
+        routed += 1;
     }
 
     // Outputs: route each bit out to the lamp reserved for it.

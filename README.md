@@ -235,13 +235,25 @@ cargo test        # 101 tests
 
 **Not done — the honest gap:**
 
-1. **Routing does not scale yet.** Small circuits place and simulate correctly,
-   but a real datapath does not: `examples/add.ohm` is 195 NOR gates and the
-   router exhausts its search budget partway through.
+1. **Routing does not scale yet.** Small circuits place and simulate correctly;
+   a real datapath does not. `examples/add.ohm` (99 combinational NOR gates, 164
+   connections) currently routes **40 of 164** before exhausting the search
+   budget. `examples/alu.ohm` still fails on its first connection.
 
-   Gates are now ordered within each row by the barycenter of their drivers,
-   which is the cheap half of placement and shortens wires — but it was not
-   enough on its own.
+   Two things helped and are in:
+
+   - **Barycenter placement** — gates are ordered within each row by the average
+     X of their drivers, which is the cheap half of placement.
+   - **Relay chains that interpolate.** This was the big one. Relay stages used
+     to sit in a shared riser field far from the circuit, so the hop into or out
+     of the chain spanned the whole build — the router was failing on the *first*
+     connection, with an empty grid and no congestion whatsoever. Stepping the
+     chain from driver toward sink keeps every hop short and took `add.ohm` from
+     0 to 40 connections routed.
+
+   Two hunches were measured and **rejected**: the netlist is not carrying 2x of
+   fat (an 8-bit adder is 99 gates against a ~9-gate/bit floor, so ~25%), and
+   letting fanout branches share wire made things worse, not better.
 
    Shared fanout trees were tried and **reverted**. Letting a branch tap an
    existing wire (inheriting that cell's recorded signal decay, so repeater
@@ -252,11 +264,14 @@ cargo test        # 101 tests
    two cooperate means teaching the router about staging directly rather than
    bolting sharing on top.
 
-   What is actually missing is congestion feedback. Nets are routed in level
-   order, with no notion of criticality, and rip-up happens only *within* a
-   single route — so an early net can take the space a later one needs and
-   nothing ever reconsiders. Congestion-driven rip-up across nets is the
-   standard answer and the real next step.
+   Nets are now routed hardest-first, which is the cheap half of what a real
+   router does. The expensive half is still missing: **negotiated congestion**
+   (PathFinder). Rip-up happens only *within* a single route, so an early net can
+   take space a later one needs and nothing ever reconsiders. The standard
+   answer is to route with overlaps allowed, price over-used cells, rip up
+   everything and re-route until no cell is contested. That is the real next step
+   — and now that routes fail from genuine congestion rather than from a
+   pathological floorplan, it is the right one.
 2. **A flip-flop cell and clock spine.** Sequential designs need a physical
    D flip-flop macro and global clock distribution.
 
