@@ -451,7 +451,28 @@ pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos), S
 
     // A -> B. A gate's output plane sits one below its input plane, so every
     // link starts by climbing a level.
+    // A drives high at rest, so every repeater on the A -> B path must start
+    // powered. Missing one leaves the loop inconsistent, which launches a
+    // one-tick pulse that circulates forever round a non-inverting loop. The
+    // path now contains refresh repeaters that `link` inserts on its own, so
+    // they are found by diffing the grid rather than assumed to be at a known
+    // spot.
+    let before: Vec<Pos> = g
+        .iter()
+        .filter(|(_, b)| matches!(b, Block::Repeater { .. }))
+        .map(|(p, _)| *p)
+        .collect();
     link(g, a.out, b.feeds[0], Material::Gate)?;
+    let added: Vec<Pos> = g
+        .iter()
+        .filter(|(p, b)| matches!(b, Block::Repeater { .. }) && !before.contains(p))
+        .map(|(p, _)| *p)
+        .collect();
+    for p in added {
+        if let Block::Repeater { facing, delay, .. } = g.get(p) {
+            g.force(p, Block::Repeater { facing, delay, powered: true });
+        }
+    }
 
     // B -> A, returning in a private column west of both cells.
     let ret = x - 3;
