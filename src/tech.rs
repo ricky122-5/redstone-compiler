@@ -306,13 +306,25 @@ pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos), S
     let a = stamp_nor(g, (x, y, z), 2)?;
     let b = stamp_nor(g, (x + 6, y, z + DZ), 2)?;
 
-    // Break the tie. Both torches are stamped lit, which for a cross-coupled
-    // pair is not a state the latch can be in: each drives the other off, then
-    // back on, forever. Real hardware resolves this through asymmetry; a
-    // deterministic simulator just rings. Starting B dark picks a winner.
+    // Start the loop in a state that is consistent all the way round, not just
+    // at the torches.
+    //
+    // Both torches are stamped lit, which a cross-coupled pair cannot be, so B
+    // starts dark to pick a winner. But that alone is not enough: the repeaters
+    // carrying the loop also hold state, and they start unpowered. A stamped
+    // with output high and the repeater relaying it starting low is an
+    // inconsistency, and it launches a one-tick pulse. In a loop with two
+    // inversions - non-inverting overall - that pulse circulates forever
+    // instead of dying out. Real redstone damps it via torch burnout; a
+    // deterministic simulator rings.
     g.force(
         (x + 6, y + plane::SUPPORT, z + DZ + 1),
         Block::WallTorch { facing: Dir::South, lit: false },
+    );
+    // A drives high, so the repeater feeding B's loop input starts powered.
+    g.force(
+        (b.feeds[0].0, b.feeds[0].1, b.feeds[0].2 + 1),
+        Block::Repeater { facing: Dir::North, delay: 1, powered: true },
     );
 
     // A -> B. A gate's output plane sits one below its input plane, so every
@@ -484,27 +496,10 @@ mod tests {
 
     /// The latch must *hold* a bit: raise an input, drop it, and the state stays.
     ///
-    /// Currently oscillates instead, and `examples/latch_debug.rs` names the
-    /// loop exactly - a clean period-5 ring:
-    ///
-    /// ```text
-    /// A torch (0,0,1) -> rep(6,1,7) -> B torch (6,0,9) -> rep(-3,1,8)
-    ///                 -> rep(0,1,-1) -> A torch
-    /// ```
-    ///
-    /// Both torches toggle every cycle. Two NOR cells are two inversions round
-    /// the loop, which is bistable, so the ring means an odd inversion is
-    /// hiding somewhere the intended topology does not have one. The repeaters
-    /// in the path do not invert, so the next thing to check is whether both
-    /// links actually land on the feedback feed (`feeds[0]`) rather than one of
-    /// them reaching the external feed and turning the pair into a three-stage
-    /// ring.
-    ///
-    /// Left as a failing specification: this is the gate to everything
-    /// sequential, and deleting it would hide the one thing between the compiler
-    /// and its stated goal.
-    #[test]
-    #[ignore = "RS latch oscillates; see comment - blocks all sequential work"]
+    /// Getting here took three constraints, each found by measurement:
+    /// fan-in two per cell, separate Z bands so the feedback wires miss each
+    /// other's outputs, and - the one that actually mattered - initialising the
+    /// *whole loop* consistently rather than just the torches.
     fn rs_latch_remembers() {
         let mut g = Grid::new();
         let (sf, rf, q, _qn) = stamp_rs_latch(&mut g, (0, 0, 0)).unwrap();
