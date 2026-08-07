@@ -362,11 +362,16 @@ pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos), S
 /// Built as `S = D AND E`, `R = !D AND E` feeding an [`stamp_rs_latch`], with
 /// the ANDs expressed in NOR form: `S = NOR(!D, !E)` and `R = NOR(D, !E)`.
 ///
-/// Each gate gets its own X column *and* its own Z stage. That is wasteful of
-/// space and deliberately so: links then always run forward in Z on a lane
-/// unique to their source, which makes the whole macro collision-free by
-/// construction rather than by careful tuning. Feedback has no levels for the
-/// router to work with, so this geometry cannot be delegated.
+/// Each gate gets its own X column *and* its own Z stage, so links always run
+/// forward in Z on a lane unique to their source. That was meant to make the
+/// macro collision-free by construction, and it is not sufficient: a link's
+/// horizontal lane is unique, but its *vertical* segment occupies one column
+/// across many Z values, and a later link's horizontal run crosses it. Two
+/// links that converge on the same cell - as S and R do on the latch - cross by
+/// necessity, and a single wiring plane has nowhere to put a crossing.
+///
+/// This is the same lesson the main router learned: a crossing needs a spare Y
+/// layer. Hand-placed macro geometry does not get to skip it.
 ///
 /// `D` and `enable` are each exposed **twice**, because two internal gates need
 /// each of them. Fanning out inside the macro would mean two links leaving one
@@ -379,7 +384,14 @@ pub fn stamp_d_latch(
     base: Pos,
 ) -> Result<(Pos, Pos, Pos, Pos, Pos, Pos), String> {
     let (x, y, z) = base;
-    const DZ: i32 = 6;
+    // Stage pitch has to keep link lanes clear of every cell's feed row.
+    //
+    // A link leaves its source at `source_z + 3` (output at +2, then one ramp
+    // step). A cell's feed row sits at `stage_z - 2`. At a pitch of 6 those are
+    // adjacent - lane 3 runs right alongside the next stage's feed at 4 - so
+    // every link shorted itself into the neighbouring gate's input. That is what
+    // held the S gate's pad high. A pitch of 8 puts three blocks between them.
+    const DZ: i32 = 8;
 
     // Stage per gate, marching forward in Z and X together.
     let not_e_s = stamp_nor(g, (x, y, z), 1)?;
@@ -607,10 +619,16 @@ mod tests {
     /// like. A *missing* link would read low, not high, so this is not a link
     /// that failed to arrive - something is powering the S gate's pad.
     ///
-    /// The other tell: the whole macro settles in 6 ticks, far too few for a
-    /// seven-stage chain, so most of it is not propagating at all. Prime suspect
-    /// is the long `run_z` that carries `not_e_s` forward past three other
-    /// stages, straying close enough to power a pad it should not touch.
+    /// That was diagnosed and fixed: at a stage pitch of 6, a link's lane
+    /// (`source_z + 3`) lands adjacent to the next stage's feed row
+    /// (`stage_z - 2`), shorting every link into the neighbouring gate's input.
+    /// A pitch of 8 puts three blocks between them.
+    ///
+    /// The next problem is now visible instead: links that converge on the same
+    /// cell cross each other, and a crossing needs a Y layer the macro does not
+    /// have. `S -> latch` runs horizontally at z=27 straight through the column
+    /// `not_e_r -> R` is descending in. Fixing that means giving macro wiring
+    /// more than one plane, exactly as the main router had to.
     #[test]
     #[ignore = "D latch does not latch yet; S/R never assert - see comment"]
     fn d_latch_follows_then_holds() {
