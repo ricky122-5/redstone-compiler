@@ -223,21 +223,27 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
 
     // Lamps are stamped before the router exists so their blocks are reserved.
     // Otherwise a route lays substrate straight through where a lamp will go.
-    let lamp_y = -(max_level + 1) * LEVEL_H;
+    //
+    // Each lamp sits just below the gate that drives it, rather than in a tidy
+    // row at the bottom of the build. A shared bottom row reads better but puts
+    // the lamp an arbitrary distance beneath its driver, and that descent is
+    // exactly the one-shot drop that dust cannot make - it was the last thing
+    // standing between `add.ohm` and a complete route. The compiler reports
+    // every lamp's coordinates anyway, so nothing downstream needs them aligned.
     let mut lamp_pad: Vec<(String, Vec<(Sig, Pos, Pos)>)> = Vec::new();
     {
         let mut lamp_x = 0;
         for (name, bits) in &net.outputs {
             let mut v = Vec::new();
             for &b in bits {
-                // The lamp *is* the pad's substrate: dust sitting on top of a
-                // block always powers it, which is the one unambiguous way to
-                // drive it. Putting the lamp beside the pad instead depends on
-                // which way the wire happens to point, and a wire arriving from
-                // one side points along that axis only - so a side-mounted lamp
-                // silently never lights.
-                let pad = (lamp_x, lamp_y, GATE_Z + 4);
-                let lamp = (lamp_x, lamp_y - 1, GATE_Z + 4);
+                let drv_y = placed.get(&b).map(|p| p.cell.out.1).unwrap_or(lever_y);
+                // Far enough below and along that the descent has room. Wire
+                // nodes in one column must differ by three in Y, so a short hop
+                // with a small drop has nowhere to put its middle and the path
+                // ends up colliding with itself.
+                let y = drv_y - 4;
+                let pad = (lamp_x, y, GATE_Z + 14);
+                let lamp = (lamp_x, y - 1, GATE_Z + 14);
                 stamp_lamp(&mut grid, lamp)?;
                 v.push((b, pad, lamp));
                 lamp_x += 3;

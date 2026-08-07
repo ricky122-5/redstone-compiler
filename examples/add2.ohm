@@ -1,0 +1,9 @@
+// A 2-bit adder: small enough that every input combination can be swept in the
+// real game, big enough to exercise multi-bit carry propagation and crossings.
+input  u2 a;
+input  u2 b;
+output u2 sum;
+
+proc main() {
+    sum = a + b;
+}

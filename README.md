@@ -235,55 +235,45 @@ cargo test        # 101 tests
 
 **Not done — the honest gap:**
 
-1. **Routing does not scale yet.** Small circuits place and simulate correctly;
-   a real datapath does not. `examples/add.ohm` (99 combinational NOR gates, 164
-   connections) currently routes **40 of 164** before exhausting the search
-   budget. `examples/alu.ohm` still fails on its first connection.
+1. **A multi-bit circuit disagrees with the real game.** `examples/add2.ohm`
+   (2-bit adder, 51 NOR gates) places, and the placed layout simulates
+   *correctly* in the block simulator for all 16 input combinations — but
+   Minecraft disagrees on 6 of them. The pattern is sharp: every case where
+   input `b[1]` is high reads 0.
 
-   Two things helped and are in:
+   ```sh
+   tools/mc-validate.sh examples/add2.ohm          # 6 of 16 MISMATCH
+   cargo run --release --example sim_sweep -- examples/add2.ohm   # all 16 ok
+   ```
 
-   - **Barycenter placement** — gates are ordered within each row by the average
-     X of their drivers, which is the cheap half of placement.
-   - **Relay chains that interpolate.** This was the big one. Relay stages used
-     to sit in a shared riser field far from the circuit, so the hop into or out
-     of the chain spanned the whole build — the router was failing on the *first*
-     connection, with an empty grid and no congestion whatsoever. Stepping the
-     chain from driver toward sink keeps every hop short and took `add.ohm` from
-     0 to 40 connections routed.
+   Because the layout simulates correctly, this is not a placement bug — it is
+   our model of redstone diverging from the game somewhere the conformance suite
+   does not yet cover. That makes it the top priority: everything verified only
+   against the internal models inherits the doubt. The next step is to extend
+   `examples/conformance.rs` until one case reproduces it, rather than bisecting
+   a 1724-block circuit.
 
-   - **Reserved landing zones.** A feed stub entry has only about three legal
-     approaches. Nothing stopped a passing net from taking all of them, and the
-     router would then spend its entire budget looking for a way into a sealed
-     target. Each feed now owns a small exclusive volume around its entrance.
+2. **Routing scales further but not far enough.** `examples/add.ohm` (99 gates,
+   164 connections) now places in full: 179x123x181, 24654 blocks. `alu.ohm`
+   still fails on its first connection (5/12 approaches, span 176).
 
-   The remaining `add.ohm` failure is diagnosed and understood: output routes do
-   not get relay staging, so a lamp row far below its driver is a one-shot
-   descent of the kind staging exists to prevent. Staging them is the next fix —
-   a first attempt overshot by also changing relay slot allocation, which
-   regressed routing from 164 back to 3 connections and was reverted.
+   What got it there, in order of how much it mattered:
 
-   Two hunches were measured and **rejected**: the netlist is not carrying 2x of
-   fat (an 8-bit adder is 99 gates against a ~9-gate/bit floor, so ~25%), and
-   letting fanout branches share wire made things worse, not better.
+   - **Reserved landing zones.** A feed stub has ~3 legal approaches; a passing
+     net could take all of them, leaving the target sealed and the router
+     burning its whole budget looking for a way in.
+   - **Relay chains that interpolate** from driver toward sink. Parking them at
+     either end made the hop into or out of the chain span the whole build.
+   - **Lamps below their driver** rather than in a shared bottom row. A tidy row
+     put each lamp an arbitrary distance beneath its driver, which is exactly
+     the one-shot descent dust cannot make.
+   - **Barycenter placement** and **hardest-first net ordering**.
 
-   Shared fanout trees were tried and **reverted**. Letting a branch tap an
-   existing wire (inheriting that cell's recorded signal decay, so repeater
-   planning stays correct) is the right idea in isolation, but it fights relay
-   staging: a branch is free to tap high up the wire and inherit the full
-   descent again, which is exactly what staging exists to prevent. Restricting
-   taps to within one stage of the target did not recover the loss. Making the
-   two cooperate means teaching the router about staging directly rather than
-   bolting sharing on top.
+   Still missing is negotiated congestion (PathFinder): rip-up happens only
+   within a single route, so an early net can take space a later one needs and
+   nothing reconsiders.
 
-   Nets are now routed hardest-first, which is the cheap half of what a real
-   router does. The expensive half is still missing: **negotiated congestion**
-   (PathFinder). Rip-up happens only *within* a single route, so an early net can
-   take space a later one needs and nothing ever reconsiders. The standard
-   answer is to route with overlaps allowed, price over-used cells, rip up
-   everything and re-route until no cell is contested. That is the real next step
-   — and now that routes fail from genuine congestion rather than from a
-   pathological floorplan, it is the right one.
-2. **A flip-flop cell and clock spine.** Sequential designs need a physical
+3. **A flip-flop cell and clock spine.** Sequential designs need a physical
    D flip-flop macro and global clock distribution.
 
 So `examples/gcd.ohm` produces a correct 724-gate netlist that simulates
