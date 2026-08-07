@@ -593,17 +593,23 @@ mod tests {
 
     /// The latch must follow D while enabled and freeze when the enable drops.
     ///
-    /// Currently Q never moves, so S and R are not asserting. The geometry is
-    /// sound - it places without collision and settles - so the fault is in the
-    /// signal path, not the layout. Two things to check, in this order, with
-    /// `latch_debug`-style instrumentation rather than reasoning:
+    /// Currently Q never moves. `examples/dlatch_debug.rs` localises it to the
+    /// S gate, and the reading is specific:
     ///
-    /// 1. Whether `not_e_*` and `not_d` outputs actually reach the S/R feeds;
-    ///    each link is long and crosses several stages.
-    /// 2. Whether the RS latch's forced initial state fights the S/R drive.
-    ///    `stamp_rs_latch` pins A high and B low, which is a *held* state - if
-    ///    S and R arrive weakly they may never overcome it.
-    #[test]
+    /// ```text
+    /// d=1 e=1   not_e_s=0  not_e_r=0  not_d=0   S=0   <-- NOR(0,0) must be 1
+    /// d=0 e=1   not_e_s=0  not_e_r=0  not_d=1   S=0   <-- NOR(1,0)=0, correct
+    /// ```
+    ///
+    /// The inverters are all correct. S is right for one input combination and
+    /// wrong for the other, which is what a gate with one input stuck high looks
+    /// like. A *missing* link would read low, not high, so this is not a link
+    /// that failed to arrive - something is powering the S gate's pad.
+    ///
+    /// The other tell: the whole macro settles in 6 ticks, far too few for a
+    /// seven-stage chain, so most of it is not propagating at all. Prime suspect
+    /// is the long `run_z` that carries `not_e_s` forward past three other
+    /// stages, straying close enough to power a pad it should not touch.
     #[ignore = "D latch does not latch yet; S/R never assert - see comment"]
     fn d_latch_follows_then_holds() {
         let mut g = Grid::new();
