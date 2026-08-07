@@ -251,6 +251,17 @@ cargo test        # 101 tests
      chain from driver toward sink keeps every hop short and took `add.ohm` from
      0 to 40 connections routed.
 
+   - **Reserved landing zones.** A feed stub entry has only about three legal
+     approaches. Nothing stopped a passing net from taking all of them, and the
+     router would then spend its entire budget looking for a way into a sealed
+     target. Each feed now owns a small exclusive volume around its entrance.
+
+   The remaining `add.ohm` failure is diagnosed and understood: output routes do
+   not get relay staging, so a lamp row far below its driver is a one-shot
+   descent of the kind staging exists to prevent. Staging them is the next fix —
+   a first attempt overshot by also changing relay slot allocation, which
+   regressed routing from 164 back to 3 connections and was reverted.
+
    Two hunches were measured and **rejected**: the netlist is not carrying 2x of
    fat (an 8-bit adder is 99 gates against a ~9-gate/bit floor, so ~25%), and
    letting fanout branches share wire made things worse, not better.

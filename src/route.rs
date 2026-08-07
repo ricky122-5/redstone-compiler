@@ -43,6 +43,11 @@ pub struct Router {
     /// Cells no dust may ever occupy: cell bodies, and the clearance above
     /// every wire node.
     blocked: HashSet<Pos>,
+    /// Cells set aside for one net's exclusive use. A feed stub entry has only
+    /// about three legal approaches, and nothing otherwise stops a passing net
+    /// from taking all of them - which walls the target in completely and sends
+    /// the router off to burn its whole search budget looking for a way in.
+    reserved: HashMap<Pos, NetId>,
     /// Cells temporarily barred while retrying a single route. Cleared between
     /// routes; this is what lets rip-up-and-retry escape a bad path shape.
     scratch: HashSet<Pos>,
@@ -107,6 +112,7 @@ impl Router {
     pub fn from_grid(grid: &Grid) -> Router {
         let mut r = Router {
             owner: HashMap::new(),
+            reserved: HashMap::new(),
             blocked: HashSet::new(),
             scratch: HashSet::new(),
             max_expansions: 250_000,
@@ -123,6 +129,11 @@ impl Router {
             }
         }
         r
+    }
+
+    /// Set `p` aside so only `net` may route through it.
+    pub fn reserve(&mut self, p: Pos, net: NetId) {
+        self.reserved.entry(p).or_insert(net);
     }
 
     /// Forbid any route from using `p`.
@@ -146,6 +157,9 @@ impl Router {
         // `blocked` wins over ownership: a cell can belong to this net and still
         // be off limits, e.g. the repeater at the end of a feed stub.
         if self.blocked.contains(&q) || self.scratch.contains(&q) {
+            return false;
+        }
+        if matches!(self.reserved.get(&q), Some(&r) if r != net) {
             return false;
         }
         // No cell is ever shared, not even between two fanout branches of the
@@ -495,7 +509,34 @@ impl Router {
             }
         }
         self.scratch.clear();
-        Err(last_err)
+        Err(format!("{last_err}; {}", self.diagnose(grid, net, sources, to)))
+    }
+
+    /// Why did a route fail? Distinguishes "the target is walled in" from "the
+    /// search space is too big" - opposite problems, indistinguishable from the
+    /// generic message, and the difference between fixing this in one step and
+    /// guessing for an afternoon.
+    fn diagnose(&self, grid: &Grid, net: NetId, sources: &[Pos], to: Pos) -> String {
+        let open_at = |p: Pos| {
+            let mut n = 0;
+            for d in Dir::ALL {
+                for q in [offset(p, d), up(offset(p, d)), down(offset(p, d))] {
+                    if self.placeable(grid, q, net) {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        let src_open: usize = sources.iter().map(|&s| open_at(s)).sum();
+        let dst_open = open_at(to);
+        let from = sources[0];
+        let span = (from.0 - to.0).abs() + (from.1 - to.1).abs() + (from.2 - to.2).abs();
+        format!(
+            "target {to:?} has {dst_open}/12 open approaches, \
+             {} source(s) have {src_open} open exits, manhattan span {span}",
+            sources.len()
+        )
     }
 }
 

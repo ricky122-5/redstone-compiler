@@ -304,6 +304,18 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             }
             // The repeater is not a wire node; routes terminate just past it.
             router.block((f.0, f.1, f.2 - STUB_LEN));
+            // Keep a landing zone around the lane entrance for this net alone.
+            // Measured: without it a passing net takes every approach and the
+            // target ends up with 0 of 12 usable neighbours, which sends the
+            // router off to spend its entire budget looking for a way in.
+            let entry = (f.0, f.1, f.2 - STUB_LEN - 1);
+            for dx in -1..=1i32 {
+                for dy in -2..=2i32 {
+                    for dz in -3..=1i32 {
+                        router.reserve((entry.0 + dx, entry.1 + dy, entry.2 + dz), src);
+                    }
+                }
+            }
             stub_entry.insert((g, j), (f.0, f.1, f.2 - STUB_LEN - 1));
         }
     }
