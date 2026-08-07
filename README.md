@@ -192,6 +192,19 @@ unit tests had not:
    dust, which is exactly permissive enough to hide bug 1. It now asks whether
    the block is actually powered.
 
+### Physics conformance
+
+`cargo run --release --example conformance -- /tmp/conf.mcfunction` builds seven
+tiny isolated configurations, prints the simulator's answer for each, and emits
+an `.mcfunction` so the game can be asked the same questions. Each case
+exercises exactly one rule, so a disagreement names the rule instead of leaving
+you to bisect a whole circuit. All seven currently agree.
+
+One behaviour is deliberately **not** modelled: a weakly powered block lights an
+adjacent lamp. Output lamps sit directly under their wire, so they are powered
+head-on and this never bites — but a lamp placed next to a powered block would
+light in-game and not in the simulator. Worth fixing before lamps move.
+
 ```sh
 cargo test        # 101 tests
 ```
@@ -200,8 +213,13 @@ cargo test        # 101 tests
 
 **Verified in actual Minecraft:**
 
-- `examples/invert.ohm` compiles to redstone that inverts correctly in the real
-  game, across all input values, repeatably (not a one-way latch).
+- `examples/invert.ohm` inverts correctly, all inputs, repeatably.
+- `examples/andgate.ohm` (3 NOR gates, crossing wires) matches its truth table
+  on all 4 input combinations.
+- All 7 cases in the physics conformance suite agree with the game: flat runs,
+  dust ramps up and down, a roofed ramp correctly *failing* to climb, weak power
+  correctly failing to cross a solid block, repeater-drives-dust, and the NOR
+  cell itself.
 
 **Working and verified against the internal models:**
 
@@ -217,15 +235,7 @@ cargo test        # 101 tests
 
 **Not done — the honest gap:**
 
-1. **Multi-gate circuits disagree with the real game.** `examples/andgate.ohm`
-   (3 NOR gates) places, simulates correctly in all three internal models, and
-   then reads stuck-high in Minecraft on 3 of 4 input combinations. The single
-   inverter passes, so the cell and a single route are right; something in
-   multi-gate routing — most likely a dust connection shape, and most likely a
-   slope — is modelled wrong. `tools/mc-validate.sh examples/andgate.ohm`
-   reproduces it. This is the top priority: it means the block simulator still
-   disagrees with reality somewhere, and every result above it inherits that.
-2. **Routing does not scale yet.** Small circuits place and simulate correctly,
+1. **Routing does not scale yet.** Small circuits place and simulate correctly,
    but a real datapath does not: `examples/add.ohm` is 195 NOR gates and the
    router exhausts its search budget partway through.
 
@@ -247,7 +257,7 @@ cargo test        # 101 tests
    single route — so an early net can take the space a later one needs and
    nothing ever reconsiders. Congestion-driven rip-up across nets is the
    standard answer and the real next step.
-3. **A flip-flop cell and clock spine.** Sequential designs need a physical
+2. **A flip-flop cell and clock spine.** Sequential designs need a physical
    D flip-flop macro and global clock distribution.
 
 So `examples/gcd.ohm` produces a correct 724-gate netlist that simulates

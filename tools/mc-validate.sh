@@ -60,8 +60,13 @@ spawn-animals=false
 spawn-monsters=false
 EOF
 
+# Wipe the world on every run. Circuits are placed at fixed coordinates, so
+# leftovers from a previous run sit underneath the new one and silently corrupt
+# the reading - which cost a whole debugging cycle chasing a bug that was not
+# there.
+rm -rf world
 PK=world/datapacks/ohm
-rm -rf "$PK"; mkdir -p "$PK/data/ohm/function"
+mkdir -p "$PK/data/ohm/function"
 cat > "$PK/pack.mcmeta" <<'EOF'
 {"pack":{"description":"ohmc validation","pack_format":61,"supported_formats":{"min_inclusive":4,"max_inclusive":99}}}
 EOF
