@@ -279,6 +279,63 @@ pub fn stamp_lamp(g: &mut Grid, pos: Pos) -> Result<(), String> {
     Ok(())
 }
 
+/// Climb or descend to `to_y`, pausing on flat landings so the signal can be
+/// refreshed. Returns the Z the staircase finished on.
+///
+/// A plain ramp cannot carry a repeater - a repeater needs the blocks either
+/// side of it level - so a tall ramp spends its whole signal budget on height
+/// and dies. Breaking the climb into short flights with a flat landing between
+/// them gives each landing somewhere to put a repeater, which is the same
+/// staircase the main layout uses for deep drops.
+pub fn ramp_staged(
+    g: &mut Grid,
+    x: i32,
+    from: (i32, i32),
+    to_y: i32,
+    step_z: i32,
+    mat: Material,
+    budget: &mut Budget,
+) -> Result<i32, String> {
+    // Short enough flights that a flight plus its landing always fits the
+    // budget, leaving room for the horizontal run afterwards.
+    const FLIGHT: i32 = 4;
+    const LANDING: i32 = 3;
+
+    let (mut y, mut z) = from;
+
+    while y != to_y {
+        let flight = (to_y - y).abs().min(FLIGHT);
+        let dy = if to_y > y { 1 } else { -1 };
+        for _ in 0..flight {
+            y += dy;
+            z += step_z;
+            g.set((x, y - 1, z), Block::Solid(mat))?;
+            g.set((x, y, z), Block::Dust { power: 0 })?;
+            budget.step_no_repeater()?;
+            let above_lower = if dy < 0 { (x, y + 1, z) } else { (x, y, z - step_z) };
+            if g.get(above_lower).is_opaque() {
+                return Err(format!("staircase at x={x} z={z} is roofed at {above_lower:?}"));
+            }
+        }
+        if y != to_y {
+            // Flat landing: a repeater in the middle restores full strength.
+            for i in 0..LANDING {
+                z += step_z;
+                g.set((x, y - 1, z), Block::Solid(mat))?;
+                if i == 1 {
+                    let facing = if step_z > 0 { Dir::North } else { Dir::South };
+                    g.set((x, y, z), Block::Repeater { facing, delay: 1, powered: false })?;
+                    *budget = Budget::fresh();
+                } else {
+                    g.set((x, y, z), Block::Dust { power: 0 })?;
+                    budget.step_no_repeater()?;
+                }
+            }
+        }
+    }
+    Ok(z)
+}
+
 /// Wire one cell's output to another cell's input feed.
 ///
 /// Every such link starts by climbing a level, because a gate's output plane
@@ -307,9 +364,18 @@ pub fn link_at(
     // Climb to the lane, cross, then descend onto the feed. The descent has to
     // begin far enough back in Z to land exactly on the feed, since dust drops
     // one level per block travelled.
-    let z1 = ramp_z(g, from_out.0, (from_out.1, from_out.2), lane_y, 1, mat, &mut bud)?;
+    let z1 = ramp_staged(g, from_out.0, (from_out.1, from_out.2), lane_y, 1, mat, &mut bud)?;
     run_x(g, lane_y, z1, from_out.0, to_feed.0, mat, &mut bud)?;
-    let drop = lane_y - to_feed.1;
+    // The descent is a staircase too, so it costs more Z than its height.
+    // A staircase costs its height plus a landing between each flight, and it
+    // must start on a full budget - a flight cannot refresh mid-climb. So the
+    // descent is preceded by an explicit landing, laid here rather than inside
+    // `ramp_staged`, which keeps the cost a pure function of the height and
+    // therefore predictable enough to work backwards from the target.
+    const LAND: i32 = 3;
+    let h = lane_y - to_feed.1;
+    let flights = (h + 3) / 4;
+    let drop = h + LAND * (flights - 1).max(0) + LAND;
     let z_turn = to_feed.2 - drop;
     if z_turn < z1 {
         return Err(format!(
@@ -317,7 +383,21 @@ pub fn link_at(
         ));
     }
     run_z(g, lane_y, to_feed.0, z1, z_turn, mat, &mut bud)?;
-    ramp_z(g, to_feed.0, (lane_y, z_turn), to_feed.1, 1, mat, &mut bud)?;
+    // Landing: refresh so the descent starts with the whole budget.
+    for i in 1..=LAND {
+        let p = (to_feed.0, lane_y, z_turn + i);
+        g.set((p.0, p.1 - 1, p.2), Block::Solid(mat))?;
+        if i == 2 {
+            g.set(p, Block::Repeater { facing: Dir::North, delay: 1, powered: false })?;
+            bud = Budget::fresh();
+        } else {
+            g.set(p, Block::Dust { power: 0 })?;
+        }
+    }
+    let end = ramp_staged(g, to_feed.0, (lane_y, z_turn + LAND), to_feed.1, 1, mat, &mut bud)?;
+    if end != to_feed.2 {
+        return Err(format!("descent landed at z={end}, wanted {}", to_feed.2));
+    }
     Ok(())
 }
 
@@ -643,43 +723,12 @@ mod tests {
 
     /// The latch must follow D while enabled and freeze when the enable drops.
     ///
-    /// Currently Q never moves. `examples/dlatch_debug.rs` localises it to the
-    /// S gate, and the reading is specific:
-    ///
-    /// ```text
-    /// d=1 e=1   not_e_s=0  not_e_r=0  not_d=0   S=0   <-- NOR(0,0) must be 1
-    /// d=0 e=1   not_e_s=0  not_e_r=0  not_d=1   S=0   <-- NOR(1,0)=0, correct
-    /// ```
-    ///
-    /// The inverters are all correct. S is right for one input combination and
-    /// wrong for the other, which is what a gate with one input stuck high looks
-    /// like. A *missing* link would read low, not high, so this is not a link
-    /// that failed to arrive - something is powering the S gate's pad.
-    ///
-    /// That was diagnosed and fixed: at a stage pitch of 6, a link's lane
-    /// (`source_z + 3`) lands adjacent to the next stage's feed row
-    /// (`stage_z - 2`), shorting every link into the neighbouring gate's input.
-    /// A pitch of 8 puts three blocks between them.
-    ///
-    /// The next problem is now visible instead: links that converge on the same
-    /// cell cross each other, and a crossing needs a Y layer the macro does not
-    /// have. `link_at` adds per-link lane heights so crossings pass over one
-    /// another, which works - and immediately runs into the constraint that
-    /// makes this hard:
-    ///
-    /// **Lane height costs signal budget.** Dust moves one block of Z per block
-    /// of Y, and a ramp cannot carry a repeater, so climbing `h` and descending
-    /// `h` spends `2h` of the fifteen-block budget before the wire has gone
-    /// anywhere. At five lanes spaced two apart the deepest link exhausts it on
-    /// the ramps alone.
-    ///
-    /// So lanes must be shallow, which means few of them, which means links have
-    /// to *share* lanes and be checked for overlap - or the ramps need repeaters
-    /// on flat landings partway up, the same staircase trick `MAX_DROP` uses in
-    /// the main layout. The latter is probably the answer, and is the next thing
-    /// to build.
+    /// Getting here needed three fixes, each found by measurement:
+    /// a stage pitch that keeps link lanes clear of feed rows, per-link Y lanes
+    /// so converging links cross over rather than into each other, and
+    /// staircased ramps so a link's climb does not spend its whole signal
+    /// budget on height.
     #[test]
-    #[ignore = "D latch does not latch yet; S/R never assert - see comment"]
     fn d_latch_follows_then_holds() {
         let mut g = Grid::new();
         let (da, db, ea, eb, q, _qn) = stamp_d_latch(&mut g, (0, 0, 0)).unwrap();
