@@ -537,42 +537,42 @@ pub fn stamp_d_latch(
     g: &mut Grid,
     base: Pos,
 ) -> Result<(Pos, Pos, Pos, Pos, Pos, Pos), String> {
+    use crate::route::Router;
     let (x, y, z) = base;
-    // Stage pitch is set by what the links need, not by how big the cells are.
-    //
-    // Each link climbs to its own lane, crosses, and descends onto the feed, and
-    // dust moves one block of Z per block of Y either way. So a link on a lane
-    // `h` above the feed plane spends `2h` blocks of Z just changing height, and
-    // the two stages it spans must be at least that far apart. With five lanes
-    // at +2..+10 the deepest costs 19, so adjacent stages sit 28 apart.
-    //
-    // A pitch of 6 also put every link's lane adjacent to the next stage's feed
-    // row, shorting it into that gate's input - which is what held the S gate's
-    // pad high.
-    const DZ: i32 = 28;
+    const DZ: i32 = 10;
 
-    // Stage per gate, marching forward in Z and X together.
+    // Gates first, then let the real router wire them.
+    //
+    // Hand-placing these links cost four rounds and three distinct spacing
+    // bugs - lanes clashing with feed rows, links crossing each other, ramps
+    // spending their whole signal budget on height. Every one of those is
+    // something `route.rs` already handles: keepout, per-net slots, staged
+    // descents, repeater insertion. The only part that genuinely cannot be
+    // routed is the latch's feedback cycle, because levelisation needs a DAG.
+    // So the cycle stays hand-placed and everything else is delegated.
     let not_e_s = stamp_nor(g, (x, y, z), 1)?;
-    let not_e_r = stamp_nor(g, (x + 6, y, z + DZ), 1)?;
-    let not_d = stamp_nor(g, (x + 12, y, z + 2 * DZ), 1)?;
-    let s_gate = stamp_nor(g, (x + 18, y, z + 3 * DZ), 2)?;
-    let r_gate = stamp_nor(g, (x + 26, y, z + 4 * DZ), 2)?;
-    // Well clear of the gate stages: the two links into the latch are the
-    // longest in the macro, and crowding them puts an inserted repeater on top
-    // of the other link's dust.
-    let (set_feed, reset_feed, q, qn) = stamp_rs_latch(g, (x + 40, y, z + 7 * DZ))?;
+    let not_e_r = stamp_nor(g, (x + 10, y, z + DZ), 1)?;
+    let not_d = stamp_nor(g, (x + 20, y, z + 2 * DZ), 1)?;
+    let s_gate = stamp_nor(g, (x + 30, y, z + 3 * DZ), 2)?;
+    let r_gate = stamp_nor(g, (x + 40, y, z + 4 * DZ), 2)?;
+    let (set_feed, reset_feed, q, qn) = stamp_rs_latch(g, (x + 55, y, z + 6 * DZ))?;
 
-    // Every link gets its own lane height, three apart so wires on neighbouring
-    // lanes cannot couple. Crossings then pass over one another.
-    let lane = |i: i32| y + 2 + 2 * i;
-    // S = NOR(!D, !E)
-    link_at(g, not_d.out, s_gate.feeds[0], lane(0), Material::Gate)?;
-    link_at(g, not_e_s.out, s_gate.feeds[1], lane(1), Material::Gate)?;
-    // R = NOR(D, !E); D arrives from outside on feeds[0].
-    link_at(g, not_e_r.out, r_gate.feeds[1], lane(2), Material::Gate)?;
+    let mut router = Router::from_grid(g);
+    let bounds = ((x - 40, y - 30, z - 40), (x + 140, y + 40, z + 9 * DZ + 40));
 
-    link_at(g, s_gate.out, set_feed, lane(3), Material::Gate)?;
-    link_at(g, r_gate.out, reset_feed, lane(4), Material::Gate)?;
+    // Each wire is its own net as far as the router is concerned.
+    let mut wire = |g: &mut Grid, r: &mut Router, net: u32, from: Pos, to: Pos| -> Result<(), String> {
+        r.claim(from, net);
+        r.claim(to, net);
+        r.route(g, net, &[from], to, bounds, Material::Gate, 0)
+            .map_err(|e| format!("d-latch wire {net}: {e}"))
+    };
+
+    wire(g, &mut router, 1, not_d.out, s_gate.feeds[0])?;
+    wire(g, &mut router, 2, not_e_s.out, s_gate.feeds[1])?;
+    wire(g, &mut router, 3, not_e_r.out, r_gate.feeds[1])?;
+    wire(g, &mut router, 4, s_gate.out, set_feed)?;
+    wire(g, &mut router, 5, r_gate.out, reset_feed)?;
 
     Ok((not_d.feeds[0], r_gate.feeds[0], not_e_s.feeds[0], not_e_r.feeds[0], q, qn))
 }
@@ -625,51 +625,38 @@ pub fn stamp_out_spine_dir(
 ///
 /// Returns `(d_feeds, clk_feeds, q)`.
 pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<(Vec<Pos>, Vec<Pos>, Pos), String> {
+    use crate::route::Router;
     let (x, y, z) = base;
 
-    // Measure what each macro actually occupies rather than guessing an offset.
-    //
-    // Hand-picked offsets have failed twice here, each time because a link had
-    // to cross a body whose extent the caller could not see. A macro knows its
-    // own footprint; the caller does not. Diffing the grid's bounds across the
-    // call is the cheapest way to publish it.
-    let extent = |g: &Grid, before: Option<(Pos, Pos)>| -> (i32, i32) {
-        let (lo, hi) = g.bounds().unwrap();
-        let z0 = before.map(|(_, h)| h.2).unwrap_or(lo.2);
-        (z0, hi.2)
-    };
+    // Measure each macro's footprint rather than guessing an offset: a caller
+    // cannot see how much room a macro took.
+    let end_z = |g: &Grid| g.bounds().map(|(_, hi)| hi.2).unwrap_or(z);
+    const GAP: i32 = 30;
 
-    let b0 = g.bounds();
     let (m_da, m_db, m_ea, m_eb, m_q, _m_qn) = stamp_d_latch(g, (x, y, z))?;
-    let (_, master_end) = extent(g, b0);
-
-    // Clear of the master, so links between the two have open ground.
-    const GAP: i32 = 24;
-    let not_clk = stamp_nor(g, (x + 70, y, master_end + GAP), 1)?;
-
-    let b1 = g.bounds();
+    let not_clk = stamp_nor(g, (x + 20, y, end_z(g) + GAP), 1)?;
     let (s_da, s_db, s_ea, s_eb, s_q, _s_qn) =
-        stamp_d_latch(g, (x + 90, y, extent(g, b1).1 + GAP))?;
+        stamp_d_latch(g, (x, y, end_z(g) + GAP))?;
 
     // Master Q and the inverted clock each drive two slave inputs, so both need
-    // somewhere to branch from.
-    // The latch's Q has its own feedback wiring behind it in Z, so its spine
-    // runs sideways into clear ground. The inverter's output has nothing behind
-    // it and can spine the usual way.
-    let mq = stamp_out_spine_dir(g, m_q, 3, (1, 0), Material::Gate)?;
-    let nc = stamp_out_spine(g, not_clk.out, 3, Material::Gate)?;
+    // somewhere to branch from. The latch's Q has its own feedback wiring behind
+    // it in Z, so that spine runs sideways.
+    let mq = stamp_out_spine_dir(g, m_q, 4, (1, 0), Material::Gate)?;
+    let nc = stamp_out_spine(g, not_clk.out, 4, Material::Gate)?;
 
-    // Links between macros must fly above them. A D latch's own wiring already
-    // reaches y+10 (five lanes at +2..+10 for its internal links), so anything
-    // routed lower crosses straight through the body it is trying to leave -
-    // which is what the last two collisions were.
-    // Come down in the gap ahead of the slave, then walk in flat. Descending on
-    // top of the feed would drop through the slave's own internal lanes.
-    let land = s_da.2 - GAP / 2;
-    link_via(g, mq[0], s_da, y + 14, Some(land), Material::Gate)?;
-    link_via(g, mq[2], s_db, y + 17, Some(land), Material::Gate)?;
-    link_via(g, nc[0], s_ea, y + 20, Some(land), Material::Gate)?;
-    link_via(g, nc[2], s_eb, y + 23, Some(land), Material::Gate)?;
+    let mut router = Router::from_grid(g);
+    let bounds = ((x - 60, y - 40, z - 60), (x + 200, y + 60, end_z(g) + 60));
+    let mut wire = |g: &mut Grid, r: &mut Router, net: u32, from: Pos, to: Pos| -> Result<(), String> {
+        r.claim(from, net);
+        r.claim(to, net);
+        r.route(g, net, &[from], to, bounds, Material::Gate, 0)
+            .map_err(|e| format!("dff wire {net}: {e}"))
+    };
+
+    wire(g, &mut router, 11, mq[0], s_da)?;
+    wire(g, &mut router, 12, mq[3], s_db)?;
+    wire(g, &mut router, 13, nc[0], s_ea)?;
+    wire(g, &mut router, 14, nc[3], s_eb)?;
 
     Ok((vec![m_da, m_db], vec![m_ea, m_eb, not_clk.feeds[0]], s_q))
 }
@@ -905,35 +892,22 @@ mod tests {
 
     /// A flip-flop must sample D on the clock edge and hold it, not follow D.
     ///
-    /// Currently fails to place, but the failure has moved somewhere
-    /// informative. Three fixes landed: the Q spine runs sideways instead of
-    /// into the latch's return wiring, macros are placed using their measured
-    /// footprint rather than a guessed offset, and links between macros fly
-    /// above them at `y+14` and up, clear of the `y+2..y+10` lanes a latch uses
-    /// internally.
+    /// Now places cleanly - every geometry problem vanished at once when the
+    /// wiring was handed to `route.rs` instead of being laid by hand. Four
+    /// rounds of collisions (lanes clashing with feed rows, links crossing each
+    /// other, ramps spending their budget on height, descents landing on top of
+    /// a body) were all solved machinery that already existed and was already
+    /// validated in-game.
     ///
-    /// Departure is now clean. Arrival is not: the link descends onto its target
-    /// feed at that feed's own column, and on the way down it passes through the
-    /// destination macro's internal lanes - the same collision as before, in
-    /// reverse.
-    ///
-    /// `link_via` now handles that: it lands in the clear gap ahead of the
-    /// target and walks into the feed flat, which is how feeds are built to be
-    /// entered. Both ends of the journey are now clear of both macro bodies.
-    ///
-    /// What is left is the four links colliding with *each other*. They descend
-    /// at four different columns but over the same stretch of Z, and a staircase
-    /// is wide in Z - height plus a landing per flight - so their substrates and
-    /// clearances interleave.
-    ///
-    /// Which is the third distinct spacing problem in this macro, and they all
-    /// have the same shape: two things need room, and nothing tracks how much
-    /// room each one takes. Rather than stagger these by hand, the descents
-    /// should be given separate Z bands the way the main layout gives relay
-    /// chains separate slots - `riser_slot` in `layout.rs` is the same idea and
-    /// is already written.
+    /// It oscillates instead, which is the RS latch's original failure one level
+    /// up: a feedback loop whose components do not start in agreement launches a
+    /// pulse that circulates forever. `stamp_rs_latch` pins its own loop, but a
+    /// D latch wraps more gates around that loop, and a flip-flop wraps two D
+    /// latches plus a clock inverter. Every torch and repeater enclosing a
+    /// feedback path has to start consistent with the state the loop is pinned
+    /// to, and only the innermost ring does today.
     #[test]
-    #[ignore = "DFF does not place: Q spine collides with latch internals"]
+    #[ignore = "DFF places but oscillates; enclosing gates start inconsistent"]
     fn dff_samples_on_the_clock_edge() {
         let mut g = Grid::new();
         let (dfs, cfs, q) = stamp_dff(&mut g, (0, 0, 0)).unwrap();
