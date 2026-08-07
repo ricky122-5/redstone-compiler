@@ -484,12 +484,21 @@ mod tests {
 
     /// The latch must *hold* a bit: raise an input, drop it, and the state stays.
     ///
-    /// Currently oscillates instead. Two cross-coupled NORs are two inversions
-    /// round the loop, which is bistable in principle, so the fault is in the
-    /// physical wiring rather than the logic. Prime suspect is the return path:
-    /// it is long enough that a repeater is inserted, and that repeater sits
-    /// inside the feedback loop. Next step is to instrument which torches are
-    /// toggling rather than guess again.
+    /// Currently oscillates instead, and `examples/latch_debug.rs` names the
+    /// loop exactly - a clean period-5 ring:
+    ///
+    /// ```text
+    /// A torch (0,0,1) -> rep(6,1,7) -> B torch (6,0,9) -> rep(-3,1,8)
+    ///                 -> rep(0,1,-1) -> A torch
+    /// ```
+    ///
+    /// Both torches toggle every cycle. Two NOR cells are two inversions round
+    /// the loop, which is bistable, so the ring means an odd inversion is
+    /// hiding somewhere the intended topology does not have one. The repeaters
+    /// in the path do not invert, so the next thing to check is whether both
+    /// links actually land on the feedback feed (`feeds[0]`) rather than one of
+    /// them reaching the external feed and turning the pair into a three-stage
+    /// ring.
     ///
     /// Left as a failing specification: this is the gate to everything
     /// sequential, and deleting it would hide the one thing between the compiler
