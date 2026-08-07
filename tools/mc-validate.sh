@@ -40,6 +40,22 @@ DEPTH=${DEPTH:-8}
 SETTLE=$(( 4 + DEPTH / 2 ))
 echo "logic depth $DEPTH -> settling ${SETTLE}s per case"
 
+# Actual extents of the emitted circuit. A hardcoded clearing volume silently
+# misses relay chains, which run far out in Z - and surviving leftovers corrupt
+# the next case exactly like a logic bug.
+read -r BX BY BZ < <(python3 - "$D/circuit.mcfunction" <<'PYX'
+import re,sys
+mx=my=mz=0
+for l in open(sys.argv[1]):
+    m=re.match(r'setblock ~(-?\d+) ~(-?\d+) ~(-?\d+)', l)
+    if m:
+        x,y,z=(int(g) for g in m.groups())
+        mx=max(mx,x); my=max(my,y); mz=max(mz,z)
+print(mx+8, my+8, mz+8)
+PYX
+)
+echo "circuit extends to ${BX}x${BY}x${BZ}"
+
 # Port coordinates, as reported by the compiler in the same frame as the
 # generated commands.
 LEVERS=$(echo "$INFO" | sed -n 's/.*lever at ~\([0-9-]*\) ~\([0-9-]*\) ~\([0-9-]*\).*/\1 \2 \3/p')
@@ -93,6 +109,20 @@ EOF
 done <<< "$LAMPS"
 NLAMP=$i
 
+# Read the input levers back. Three separate harness bugs have now produced
+# "logic mismatches" that were really the harness failing to drive the circuit,
+# so the harness verifies its own inputs rather than assuming they took.
+j=0
+while read -r vx vy vz; do
+  [ -n "$vx" ] || continue
+  cat >> "$PK/data/ohm/function/probe.mcfunction" <<EOF
+execute if block $vx $vy $vz minecraft:lever[powered=true] run say OHMC_LEV $j 1
+execute if block $vx $vy $vz minecraft:lever[powered=false] run say OHMC_LEV $j 0
+execute unless block $vx $vy $vz minecraft:lever run say OHMC_LEV $j missing
+EOF
+  j=$((j+1))
+done <<< "$LEVERS"
+
 rm -f server.log cmd; mkfifo cmd; exec 3<>cmd
 "$JAVA" -Xmx2G -jar server.jar nogui < cmd > server.log 2>&1 &
 SRV=$!
@@ -109,8 +139,21 @@ send "reload" 3
 send "execute positioned 0.0 0.0 0.0 run function ohm:circuit" 3
 
 # --- sweep every input combination -----------------------------------------
+#
+# One case per server run, each on a freshly created world.
+#
+# This is slow - a server boot per case - and three faster schemes were tried
+# and all produced readings that disagreed with a fresh world: rebuilding in
+# place (leftovers survive), clearing first (`fill` caps at 32768 blocks and
+# fails silently above it), and offsetting each case in X (`forceload` caps at
+# 256 chunks, so distant cases sit in unticked chunks and read as zero).
+#
+# Every one of those looked exactly like a compiler bug. Correctness of the
+# measurement matters more here than its speed, because this harness is the only
+# thing standing between "verified" and "verified against our own assumptions".
 CASES=$((1 << NLEV))
 for v in $(seq 0 $((CASES-1))); do
+  send "execute positioned 0.0 0.0 0.0 run function ohm:circuit" 2
   b=0
   while read -r x y z; do
     [ -n "$x" ] || continue
@@ -119,9 +162,30 @@ for v in $(seq 0 $((CASES-1))); do
     send "setblock $x $y $z minecraft:lever[face=floor,facing=north,powered=$st]" 0
     b=$((b+1))
   done <<< "$LEVERS"
-  sleep "$SETTLE"    # let the circuit settle; scaled to logic depth above
+  sleep "$SETTLE"
   send "say OHMC_CASE $v" 1
   send "function ohm:probe" 2
+
+  # Restart onto a virgin world unless this was the last case.
+  if [ "$v" -lt $((CASES-1)) ]; then
+    send "stop" 2
+    wait $SRV 2>/dev/null
+    cp -R "$PK" /tmp/ohm-pack-keep
+    rm -rf world
+    mkdir -p "$(dirname "$PK")"
+    cp -R /tmp/ohm-pack-keep "$PK"
+    rm -rf /tmp/ohm-pack-keep
+    exec 3>&-
+    rm -f cmd; mkfifo cmd; exec 3<>cmd
+    "$JAVA" -Xmx2G -jar server.jar nogui < cmd >> server.log 2>&1 &
+    SRV=$!
+    for _ in $(seq 1 150); do
+      grep -q "Done (" <(tail -40 server.log) && break
+      sleep 2
+    done
+    send "forceload add -48 -48 96 96" 1
+    send "reload" 2
+  fi
 done
 send "stop" 2
 wait $SRV 2>/dev/null
@@ -139,7 +203,7 @@ for line in """$TRUTH""".splitlines():
     if m:
         expected[int(m.group(1))] = m.group(2).strip()
 
-observed, case = {}, None
+observed, levers, case = {}, {}, None
 for line in log.splitlines():
     m = re.search(r"OHMC_CASE (\d+)", line)
     if m:
@@ -147,15 +211,25 @@ for line in log.splitlines():
     m = re.search(r"OHMC_BIT (\d+) ([01])", line)
     if m and case is not None:
         observed[case][int(m.group(1))] = int(m.group(2))
+    m = re.search(r"OHMC_LEV (\d+) (\S+)", line)
+    if m and case is not None:
+        levers.setdefault(case, {})[int(m.group(1))] = m.group(2)
 
 fails = 0
 for v in sorted(expected):
     bits = observed.get(v, {})
     got = sum(bits.get(i, 0) << i for i in range(nlamp))
     exp_val = int(re.search(r"=(\d+)", expected[v]).group(1))
+    # Did the harness actually drive the inputs it meant to?
+    seen = levers.get(v, {})
+    want_bits = {i: str((v >> i) & 1) for i in range(len(seen))}
+    bad_drive = [i for i, w in want_bits.items() if seen.get(i) != w]
     ok = (got == exp_val)
     fails += not ok
-    print(f"  in={v:<4} expected {expected[v]:<12} observed {got:<6} {'ok' if ok else 'MISMATCH'}")
+    note = "ok" if ok else "MISMATCH"
+    if bad_drive:
+        note += f"  [HARNESS: lever(s) {bad_drive} read back wrong]"
+    print(f"  in={v:<4} expected {expected[v]:<12} observed {got:<6} {note}")
 print()
 print("FAIL: %d case(s) disagree" % fails if fails else "PASS: Minecraft agrees with the compiler on all %d cases" % len(expected))
 sys.exit(1 if fails else 0)

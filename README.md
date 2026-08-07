@@ -237,36 +237,34 @@ cargo test        # 101 tests
 
 **Not done — the honest gap:**
 
-1. **A multi-bit circuit latches in the real game.** `examples/add2.ohm` (2-bit
-   adder) answers correctly in Minecraft from a freshly placed circuit — verified
-   directly, and its 316 powered dust cells match the simulator exactly. But once
-   its inputs have been toggled through a few states it sticks high and never
-   recovers. The simulator, driven the same way, does not stick.
+1. **The 2-bit adder is 14/16 in the real game, and the harness is the weak
+   link.** `examples/add2.ohm` was reported last round as latching. It does not.
+   Driven correctly it computes correctly: verified cell by cell at two separate
+   inputs, where all 336 powered dust cells and both output lamps match the
+   simulator exactly.
 
-   Ruled out so far, each by measurement rather than argument:
+   What was actually wrong was the validator. Four separate harness defects, each
+   of which produced output indistinguishable from a compiler bug:
 
-   - *Wrong logic.* Every one of 316 powered dust cells matches the game.
-   - *Settling time.* Worst-case settling is 26 redstone ticks (2.6 s); the
-     validator now waits 4 s + depth/2.
-   - *Repeater side-locking.* A static scan finds 0 locking pairs among 89
-     repeaters.
-   - *Lamps lit by neighbours.* Real, and now both modelled and designed around
-     (see below), but not the cause here.
+   - **Rebuilding in place.** Leftovers from the previous case survive underneath
+     the new one.
+   - **`fill` caps at 32768 blocks** and fails *silently* above it, so the
+     clearing step did nothing at all.
+   - **`forceload` caps at 256 chunks**, so an attempt to give each case its own
+     patch of ground left distant cases in unticked chunks reading zero.
+   - **`sim_sweep` built a fresh simulator per input**, so it began from a clean
+     slate every time and could not observe state-dependence by construction.
 
-   The leading suspect is **torch burnout**, which the simulator explicitly does
-   not model. A torch burns out after ~8 toggles in 60 game ticks and then stays
-   off, pinning its gate low. The original justification for skipping it — that
-   generated circuits are clocked well below that rate — is simply false for a
-   combinational circuit driven by hand, where a deep NOR network glitches
-   repeatedly as a wavefront passes.
+   The validator now runs one case per freshly created world, which is slow -
+   a server boot per case - but is the only scheme measured to agree with a
+   hand-checked result. It also reads the input levers back and reports
+   `[HARNESS: ...]` when it failed to drive the circuit, so a harness failure can
+   no longer masquerade as a logic error.
 
-   Two methodology fixes came out of chasing this, both of which were hiding it:
-
-   - `sim_sweep` built a **fresh simulator per input**, so it began from a clean
-     slate every time and was structurally incapable of observing latch-up. It
-     now keeps one simulator and toggles levers between cases, as the game does.
-   - The validator's settling time was a fixed 3 s guess; it now scales with the
-     circuit's logic depth.
+   Two cases still disagree, both reading zero, which is what an unsettled
+   circuit looks like. Raising the settling time destabilised the server-restart
+   sequencing instead of helping, and the lever readback caught that immediately.
+   Making the restart robust is the next step, not a compiler change.
 
 2. **Routing scales further but not far enough.** `examples/add.ohm` (99 gates,
    164 connections) now places in full: 179x123x181, 24654 blocks. `alu.ohm`
