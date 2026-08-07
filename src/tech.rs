@@ -360,6 +360,24 @@ pub fn link_at(
     lane_y: i32,
     mat: Material,
 ) -> Result<(), String> {
+    link_via(g, from_out, to_feed, lane_y, None, mat)
+}
+
+/// As [`link_at`], but descending at a chosen Z rather than as late as possible.
+///
+/// Descending directly onto a feed means dropping through whatever sits above
+/// it, and above a macro's feed is that macro's own internal wiring. Coming
+/// down early - in the clear gap between macros - and then approaching the feed
+/// horizontally avoids the body entirely. Feeds are built to be entered from the
+/// north, so a flat approach is what they expect.
+pub fn link_via(
+    g: &mut Grid,
+    from_out: Pos,
+    to_feed: Pos,
+    lane_y: i32,
+    descend_by: Option<i32>,
+    mat: Material,
+) -> Result<(), String> {
     let mut bud = Budget::fresh();
     // Climb to the lane, cross, then descend onto the feed. The descent has to
     // begin far enough back in Z to land exactly on the feed, since dust drops
@@ -376,7 +394,10 @@ pub fn link_at(
     let h = lane_y - to_feed.1;
     let flights = (h + 3) / 4;
     let drop = h + LAND * (flights - 1).max(0) + LAND;
-    let z_turn = to_feed.2 - drop;
+    // Land by `descend_by` when given, so the drop happens in open ground and
+    // the last stretch into the feed is flat.
+    let land_at = descend_by.unwrap_or(to_feed.2);
+    let z_turn = land_at - drop;
     if z_turn < z1 {
         return Err(format!(
             "link from {from_out:?} to {to_feed:?} on lane y={lane_y} has no room to descend"
@@ -395,9 +416,11 @@ pub fn link_at(
         }
     }
     let end = ramp_staged(g, to_feed.0, (lane_y, z_turn + LAND), to_feed.1, 1, mat, &mut bud)?;
-    if end != to_feed.2 {
-        return Err(format!("descent landed at z={end}, wanted {}", to_feed.2));
+    if end != land_at {
+        return Err(format!("descent landed at z={end}, wanted {land_at}"));
     }
+    // Flat approach along the feed plane.
+    run_z(g, to_feed.1, to_feed.0, end, to_feed.2, mat, &mut bud)?;
     Ok(())
 }
 
@@ -640,10 +663,13 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<(Vec<Pos>, Vec<Pos>, Pos), S
     // reaches y+10 (five lanes at +2..+10 for its internal links), so anything
     // routed lower crosses straight through the body it is trying to leave -
     // which is what the last two collisions were.
-    link_at(g, mq[0], s_da, y + 14, Material::Gate)?;
-    link_at(g, mq[2], s_db, y + 17, Material::Gate)?;
-    link_at(g, nc[0], s_ea, y + 20, Material::Gate)?;
-    link_at(g, nc[2], s_eb, y + 23, Material::Gate)?;
+    // Come down in the gap ahead of the slave, then walk in flat. Descending on
+    // top of the feed would drop through the slave's own internal lanes.
+    let land = s_da.2 - GAP / 2;
+    link_via(g, mq[0], s_da, y + 14, Some(land), Material::Gate)?;
+    link_via(g, mq[2], s_db, y + 17, Some(land), Material::Gate)?;
+    link_via(g, nc[0], s_ea, y + 20, Some(land), Material::Gate)?;
+    link_via(g, nc[2], s_eb, y + 23, Some(land), Material::Gate)?;
 
     Ok((vec![m_da, m_db], vec![m_ea, m_eb, not_clk.feeds[0]], s_q))
 }
@@ -891,11 +917,21 @@ mod tests {
     /// destination macro's internal lanes - the same collision as before, in
     /// reverse.
     ///
-    /// So the port discipline needs to cover both ends. A macro must publish
-    /// *approach corridors* as well as output spines: a column beside each input
-    /// feed, clear from above, where a caller may descend. The main layout
-    /// already learned this - it is exactly the reserved landing zone that took
-    /// `add.ohm` from 40 routed connections to all 164.
+    /// `link_via` now handles that: it lands in the clear gap ahead of the
+    /// target and walks into the feed flat, which is how feeds are built to be
+    /// entered. Both ends of the journey are now clear of both macro bodies.
+    ///
+    /// What is left is the four links colliding with *each other*. They descend
+    /// at four different columns but over the same stretch of Z, and a staircase
+    /// is wide in Z - height plus a landing per flight - so their substrates and
+    /// clearances interleave.
+    ///
+    /// Which is the third distinct spacing problem in this macro, and they all
+    /// have the same shape: two things need room, and nothing tracks how much
+    /// room each one takes. Rather than stagger these by hand, the descents
+    /// should be given separate Z bands the way the main layout gives relay
+    /// chains separate slots - `riser_slot` in `layout.rs` is the same idea and
+    /// is already written.
     #[test]
     #[ignore = "DFF does not place: Q spine collides with latch internals"]
     fn dff_samples_on_the_clock_edge() {
