@@ -285,10 +285,40 @@ pub fn stamp_lamp(g: &mut Grid, pos: Pos) -> Result<(), String> {
 /// sits one below its input plane (see [`plane`]). Stages are therefore placed
 /// at increasing Z so the ramp has somewhere to go.
 pub fn link(g: &mut Grid, from_out: Pos, to_feed: Pos, mat: Material) -> Result<(), String> {
+    link_at(g, from_out, to_feed, to_feed.1, mat)
+}
+
+/// Wire an output to a feed, carrying the signal over on its own Y plane.
+///
+/// Routing every link in the feed plane does not work once two of them converge
+/// on the same cell: one link's vertical segment occupies a column across many
+/// Z values, and the other's horizontal run crosses it. Giving each link a
+/// private lane height means crossings pass over one another, which is the only
+/// way a single wire plane can be avoided - and the same conclusion the main
+/// router reached.
+pub fn link_at(
+    g: &mut Grid,
+    from_out: Pos,
+    to_feed: Pos,
+    lane_y: i32,
+    mat: Material,
+) -> Result<(), String> {
     let mut bud = Budget::fresh();
-    let z = ramp_z(g, from_out.0, (from_out.1, from_out.2), to_feed.1, 1, mat, &mut bud)?;
-    run_x(g, to_feed.1, z, from_out.0, to_feed.0, mat, &mut bud)?;
-    run_z(g, to_feed.1, to_feed.0, z, to_feed.2, mat, &mut bud)
+    // Climb to the lane, cross, then descend onto the feed. The descent has to
+    // begin far enough back in Z to land exactly on the feed, since dust drops
+    // one level per block travelled.
+    let z1 = ramp_z(g, from_out.0, (from_out.1, from_out.2), lane_y, 1, mat, &mut bud)?;
+    run_x(g, lane_y, z1, from_out.0, to_feed.0, mat, &mut bud)?;
+    let drop = lane_y - to_feed.1;
+    let z_turn = to_feed.2 - drop;
+    if z_turn < z1 {
+        return Err(format!(
+            "link from {from_out:?} to {to_feed:?} on lane y={lane_y} has no room to descend"
+        ));
+    }
+    run_z(g, lane_y, to_feed.0, z1, z_turn, mat, &mut bud)?;
+    ramp_z(g, to_feed.0, (lane_y, z_turn), to_feed.1, 1, mat, &mut bud)?;
+    Ok(())
 }
 
 /// A cross-coupled NOR latch: the memory element every flip-flop is built from.
@@ -384,14 +414,18 @@ pub fn stamp_d_latch(
     base: Pos,
 ) -> Result<(Pos, Pos, Pos, Pos, Pos, Pos), String> {
     let (x, y, z) = base;
-    // Stage pitch has to keep link lanes clear of every cell's feed row.
+    // Stage pitch is set by what the links need, not by how big the cells are.
     //
-    // A link leaves its source at `source_z + 3` (output at +2, then one ramp
-    // step). A cell's feed row sits at `stage_z - 2`. At a pitch of 6 those are
-    // adjacent - lane 3 runs right alongside the next stage's feed at 4 - so
-    // every link shorted itself into the neighbouring gate's input. That is what
-    // held the S gate's pad high. A pitch of 8 puts three blocks between them.
-    const DZ: i32 = 8;
+    // Each link climbs to its own lane, crosses, and descends onto the feed, and
+    // dust moves one block of Z per block of Y either way. So a link on a lane
+    // `h` above the feed plane spends `2h` blocks of Z just changing height, and
+    // the two stages it spans must be at least that far apart. With five lanes
+    // at +2..+10 the deepest costs 19, so adjacent stages sit 28 apart.
+    //
+    // A pitch of 6 also put every link's lane adjacent to the next stage's feed
+    // row, shorting it into that gate's input - which is what held the S gate's
+    // pad high.
+    const DZ: i32 = 28;
 
     // Stage per gate, marching forward in Z and X together.
     let not_e_s = stamp_nor(g, (x, y, z), 1)?;
@@ -404,14 +438,17 @@ pub fn stamp_d_latch(
     // of the other link's dust.
     let (set_feed, reset_feed, q, qn) = stamp_rs_latch(g, (x + 40, y, z + 7 * DZ))?;
 
+    // Every link gets its own lane height, three apart so wires on neighbouring
+    // lanes cannot couple. Crossings then pass over one another.
+    let lane = |i: i32| y + 2 + 2 * i;
     // S = NOR(!D, !E)
-    link(g, not_d.out, s_gate.feeds[0], Material::Gate)?;
-    link(g, not_e_s.out, s_gate.feeds[1], Material::Gate)?;
+    link_at(g, not_d.out, s_gate.feeds[0], lane(0), Material::Gate)?;
+    link_at(g, not_e_s.out, s_gate.feeds[1], lane(1), Material::Gate)?;
     // R = NOR(D, !E); D arrives from outside on feeds[0].
-    link(g, not_e_r.out, r_gate.feeds[1], Material::Gate)?;
+    link_at(g, not_e_r.out, r_gate.feeds[1], lane(2), Material::Gate)?;
 
-    link(g, s_gate.out, set_feed, Material::Gate)?;
-    link(g, r_gate.out, reset_feed, Material::Gate)?;
+    link_at(g, s_gate.out, set_feed, lane(3), Material::Gate)?;
+    link_at(g, r_gate.out, reset_feed, lane(4), Material::Gate)?;
 
     Ok((not_d.feeds[0], r_gate.feeds[0], not_e_s.feeds[0], not_e_r.feeds[0], q, qn))
 }
@@ -626,9 +663,21 @@ mod tests {
     ///
     /// The next problem is now visible instead: links that converge on the same
     /// cell cross each other, and a crossing needs a Y layer the macro does not
-    /// have. `S -> latch` runs horizontally at z=27 straight through the column
-    /// `not_e_r -> R` is descending in. Fixing that means giving macro wiring
-    /// more than one plane, exactly as the main router had to.
+    /// have. `link_at` adds per-link lane heights so crossings pass over one
+    /// another, which works - and immediately runs into the constraint that
+    /// makes this hard:
+    ///
+    /// **Lane height costs signal budget.** Dust moves one block of Z per block
+    /// of Y, and a ramp cannot carry a repeater, so climbing `h` and descending
+    /// `h` spends `2h` of the fifteen-block budget before the wire has gone
+    /// anywhere. At five lanes spaced two apart the deepest link exhausts it on
+    /// the ramps alone.
+    ///
+    /// So lanes must be shallow, which means few of them, which means links have
+    /// to *share* lanes and be checked for overlap - or the ramps need repeaters
+    /// on flat landings partway up, the same staircase trick `MAX_DROP` uses in
+    /// the main layout. The latter is probably the answer, and is the next thing
+    /// to build.
     #[test]
     #[ignore = "D latch does not latch yet; S/R never assert - see comment"]
     fn d_latch_follows_then_holds() {
