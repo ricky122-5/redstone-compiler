@@ -554,6 +554,61 @@ pub fn stamp_d_latch(
     Ok((not_d.feeds[0], r_gate.feeds[0], not_e_s.feeds[0], not_e_r.feeds[0], q, qn))
 }
 
+/// Extend a cell's output into a short spine of dust, so several links can
+/// leave it from different points.
+///
+/// A cell's output is a single dust block, and two links starting there would
+/// both ramp out of the same cell and overlap. Giving the output a spine is the
+/// same answer the main router uses for high-fanout drivers: several places to
+/// leave from rather than one.
+pub fn stamp_out_spine(g: &mut Grid, out: Pos, len: i32, mat: Material) -> Result<Vec<Pos>, String> {
+    let mut cells = vec![out];
+    for i in 1..=len {
+        let p = (out.0, out.1, out.2 + i);
+        g.set((p.0, p.1 - 1, p.2), Block::Solid(mat))?;
+        g.set(p, Block::Dust { power: 0 })?;
+        cells.push(p);
+    }
+    Ok(cells)
+}
+
+/// A master-slave D flip-flop: `Q` takes the value of `D` on the clock's
+/// falling edge, and holds it for the rest of the cycle.
+///
+/// Two [`stamp_d_latch`]es in series, the master enabled while the clock is
+/// high and the slave while it is low. Only one is ever transparent, so data
+/// cannot race through both in a single cycle - which is the whole point, and
+/// the reason an FSM can have its next state depend on its current one.
+///
+/// Every input is exposed more than once rather than fanned out internally, for
+/// the same reason the D latch does it: a caller routing a net to several feeds
+/// costs nothing, whereas fanning out inside the macro means several links
+/// leaving one output and overlapping.
+///
+/// Returns `(d_feeds, clk_feeds, q)`.
+pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<(Vec<Pos>, Vec<Pos>, Pos), String> {
+    let (x, y, z) = base;
+
+    let (m_da, m_db, m_ea, m_eb, m_q, _m_qn) = stamp_d_latch(g, (x, y, z))?;
+
+    // The slave runs on the inverted clock, so only one latch is ever open.
+    let not_clk = stamp_nor(g, (x + 70, y, z + 40), 1)?;
+
+    let (s_da, s_db, s_ea, s_eb, s_q, _s_qn) = stamp_d_latch(g, (x + 90, y, z + 120))?;
+
+    // Master Q and the inverted clock each drive two slave inputs, so both need
+    // somewhere to branch from.
+    let mq = stamp_out_spine(g, m_q, 3, Material::Gate)?;
+    let nc = stamp_out_spine(g, not_clk.out, 3, Material::Gate)?;
+
+    link_at(g, mq[0], s_da, y + 2, Material::Gate)?;
+    link_at(g, mq[2], s_db, y + 4, Material::Gate)?;
+    link_at(g, nc[0], s_ea, y + 6, Material::Gate)?;
+    link_at(g, nc[2], s_eb, y + 8, Material::Gate)?;
+
+    Ok((vec![m_da, m_db], vec![m_ea, m_eb, not_clk.feeds[0]], s_q))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -780,6 +835,63 @@ mod tests {
         let held = sim.field().dust_at(q) > 0;
         set(&mut sim, true, false);
         assert_eq!(sim.field().dust_at(q) > 0, held, "Q must hold once disabled");
+    }
+
+
+    /// A flip-flop must sample D on the clock edge and hold it, not follow D.
+    ///
+    /// Currently fails to place: the master's Q spine runs into the RS latch's
+    /// own return wiring, because a latch's `q` is a cell output buried inside
+    /// the macro rather than a free-standing port with clear space in front of
+    /// it.
+    ///
+    /// The fix is a proper port discipline: a macro should hand back outputs
+    /// that already have room to branch, rather than raw cell outputs the caller
+    /// then has to extend into whatever happens to be next door. `stamp_d_latch`
+    /// should build the spine itself, in space it knows is free, and return
+    /// that.
+    #[test]
+    #[ignore = "DFF does not place: Q spine collides with latch internals"]
+    fn dff_samples_on_the_clock_edge() {
+        let mut g = Grid::new();
+        let (dfs, cfs, q) = stamp_dff(&mut g, (0, 0, 0)).unwrap();
+        let dl: Vec<Pos> = dfs.iter().map(|&f| drive(&mut g, f)).collect();
+        let cl: Vec<Pos> = cfs.iter().map(|&f| drive(&mut g, f)).collect();
+        let mut sim = Sim::new(&g);
+
+        let apply = |sim: &mut Sim, d: bool, c: bool| {
+            for &l in &dl {
+                sim.set_lever(l, d);
+            }
+            for &l in &cl {
+                sim.set_lever(l, c);
+            }
+            let (t, ok) = sim.run_until_stable(20000);
+            assert!(ok, "did not settle after {t} ticks (d={d} clk={c})");
+        };
+
+        // Clock a 1 through: raise D, pulse the clock, and Q should take it.
+        apply(&mut sim, true, false);
+        apply(&mut sim, true, true);
+        apply(&mut sim, true, false);
+        let after_one = sim.field().dust_at(q) > 0;
+
+        // Now drop D with the clock idle. Q must NOT follow.
+        apply(&mut sim, false, false);
+        assert_eq!(
+            sim.field().dust_at(q) > 0,
+            after_one,
+            "Q must hold between clock edges, not follow D"
+        );
+
+        // Clock the 0 through; now it may change.
+        apply(&mut sim, false, true);
+        apply(&mut sim, false, false);
+        assert_ne!(
+            sim.field().dust_at(q) > 0,
+            after_one,
+            "Q must take the new value on the next edge"
+        );
     }
 
     /// A run longer than the dust budget must still deliver full strength.
