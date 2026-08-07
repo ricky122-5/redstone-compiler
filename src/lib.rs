@@ -22,5 +22,6 @@ pub mod parser;
 pub mod redstone;
 pub mod route;
 pub mod schem;
+pub mod structure;
 pub mod tech;
 pub mod world;

@@ -1,0 +1,9 @@
+// Two inputs, so the router has to cross wires and the validator has to sweep
+// all four input combinations.
+input  u1 a;
+input  u1 b;
+output u1 q;
+
+proc main() {
+    q = a & b;
+}

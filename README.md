@@ -142,8 +142,9 @@ unlikely.
 
 ## Verification
 
-Nothing here is asserted on faith. There are **three independent models**, and
-they are differentially tested against each other:
+Nothing here is asserted on faith. There are **three independent models**
+differentially tested against each other, plus a fourth check against the actual
+game:
 
 1. **`machine.rs`** — a cycle-accurate interpreter of the word-level IR. Golden.
 2. **`netlist.rs`** — a gate-level simulator of the NOR netlist.
@@ -160,13 +161,49 @@ to blocks and simulates the blocks.
 deliberately not (sub-tick update ordering, torch burnout, quasi-connectivity) —
 the generated circuits are synchronous and clocked well below those thresholds.
 
+### Against the real game
+
+The three models above could all be wrong in the same way, because two of them
+were written from the same understanding of redstone. So there is also a harness
+that boots a **headless vanilla Minecraft server**, places a compiled circuit via
+a datapack, sweeps every input combination by toggling the lever blocks, and
+diffs the lamps against `ohmc --truth`:
+
 ```sh
-cargo test        # 96 tests
+cargo build --release
+tools/mc-validate.sh examples/invert.ohm
+#   in=0    expected q=1   observed 1   ok
+#   in=1    expected q=0   observed 0   ok
+#   PASS: Minecraft agrees with the compiler on all 2 cases
+```
+
+It downloads Mojang's official server jar (SHA-verified against the local
+version manifest) into a scratch directory. Nothing touches an existing install.
+
+Running it for the first time immediately found **two real bugs** that 96 passing
+unit tests had not:
+
+1. Output lamps were mounted *beside* the final wire. Dust only powers the block
+   beneath it and the blocks it points into, and dust with a single connection
+   renders as a straight line along that one axis — so a lamp off to the side of
+   an arriving wire never lit. Lamps are now the substrate *under* the final
+   dust, which is the same unambiguous interaction the whole cell library rests on.
+2. The block simulator's `lamp_lit` returned true for *any* adjacent powered
+   dust, which is exactly permissive enough to hide bug 1. It now asks whether
+   the block is actually powered.
+
+```sh
+cargo test        # 101 tests
 ```
 
 ## Status — what works and what doesn't
 
-**Working and verified end to end:**
+**Verified in actual Minecraft:**
+
+- `examples/invert.ohm` compiles to redstone that inverts correctly in the real
+  game, across all input values, repeatably (not a one-way latch).
+
+**Working and verified against the internal models:**
 
 - Full frontend: lexer, parser, width checking, function inlining, FSMD lowering.
 - Bit-blasting to a NOR/DFF netlist, differentially tested against the golden
@@ -180,7 +217,15 @@ cargo test        # 96 tests
 
 **Not done — the honest gap:**
 
-1. **Routing does not scale yet.** Small circuits place and simulate correctly,
+1. **Multi-gate circuits disagree with the real game.** `examples/andgate.ohm`
+   (3 NOR gates) places, simulates correctly in all three internal models, and
+   then reads stuck-high in Minecraft on 3 of 4 input combinations. The single
+   inverter passes, so the cell and a single route are right; something in
+   multi-gate routing — most likely a dust connection shape, and most likely a
+   slope — is modelled wrong. `tools/mc-validate.sh examples/andgate.ohm`
+   reproduces it. This is the top priority: it means the block simulator still
+   disagrees with reality somewhere, and every result above it inherits that.
+2. **Routing does not scale yet.** Small circuits place and simulate correctly,
    but a real datapath does not: `examples/add.ohm` is 195 NOR gates and the
    router exhausts its search budget partway through.
 
@@ -202,7 +247,7 @@ cargo test        # 96 tests
    single route — so an early net can take the space a later one needs and
    nothing ever reconsiders. Congestion-driven rip-up across nets is the
    standard answer and the real next step.
-2. **A flip-flop cell and clock spine.** Sequential designs need a physical
+3. **A flip-flop cell and clock spine.** Sequential designs need a physical
    D flip-flop macro and global clock distribution.
 
 So `examples/gcd.ohm` produces a correct 724-gate netlist that simulates
@@ -221,3 +266,5 @@ why rather than emitting something broken.
 | `tech.rs` | redstone cell library |
 | `layout.rs` `route.rs` | floorplan; 3D maze router with rip-up and retry |
 | `world.rs` `nbt.rs` `schem.rs` | block world, NBT writer, schematic emitter |
+| `structure.rs` | vanilla structure-block and `.mcfunction` export (no mods) |
+| `tools/mc-validate.sh` | headless-server validation against the real game |

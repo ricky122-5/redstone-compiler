@@ -222,9 +222,14 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         for (name, bits) in &net.outputs {
             let mut v = Vec::new();
             for &b in bits {
+                // The lamp *is* the pad's substrate: dust sitting on top of a
+                // block always powers it, which is the one unambiguous way to
+                // drive it. Putting the lamp beside the pad instead depends on
+                // which way the wire happens to point, and a wire arriving from
+                // one side points along that axis only - so a side-mounted lamp
+                // silently never lights.
                 let pad = (lamp_x, lamp_y, GATE_Z + 4);
-                let lamp = (lamp_x, lamp_y, GATE_Z + 5);
-                grid.set((lamp.0, lamp.1 - 1, lamp.2), Block::Solid(Material::PortOut))?;
+                let lamp = (lamp_x, lamp_y - 1, GATE_Z + 4);
                 stamp_lamp(&mut grid, lamp)?;
                 v.push((b, pad, lamp));
                 lamp_x += 3;

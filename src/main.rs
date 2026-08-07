@@ -1,7 +1,7 @@
 //! `ohmc` - command line driver. All the compiler logic lives in the library.
 
 
-use ohmc::{bitblast, layout, lower, machine, parser, schem};
+use ohmc::{bitblast, layout, lower, machine, parser, schem, structure};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
@@ -12,7 +12,10 @@ USAGE:
 
 OPTIONS:
     --run a=1,b=2      execute the program on the golden model and print outputs
-    -o <file.schem>    write a Sponge v3 schematic (combinational programs only)
+    -o <file.schem>    write a Sponge v3 schematic (needs WorldEdit)
+    --nbt <file.nbt>   write a vanilla structure-block file (no mods needed)
+    --mcfn <file>      write a .mcfunction of setblock commands (no mods needed)
+    --truth            print the expected truth table (for in-game validation)
     --stats            print compilation statistics
     -h, --help         show this message
 ";
@@ -36,7 +39,10 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut path = None;
     let mut run_inputs = None;
     let mut out = None;
+    let mut nbt_out = None;
+    let mut mcfn_out = None;
     let mut stats = false;
+    let mut truth = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -49,6 +55,15 @@ fn run(args: &[String]) -> Result<(), String> {
                 i += 1;
                 out = Some(args.get(i).ok_or("-o needs a path")?.clone());
             }
+            "--nbt" => {
+                i += 1;
+                nbt_out = Some(args.get(i).ok_or("--nbt needs a path")?.clone());
+            }
+            "--mcfn" => {
+                i += 1;
+                mcfn_out = Some(args.get(i).ok_or("--mcfn needs a path")?.clone());
+            }
+            "--truth" => truth = true,
             "--stats" => stats = true,
             a if a.starts_with('-') => return Err(format!("unknown flag `{a}`")),
             a => path = Some(a.to_string()),
@@ -90,7 +105,33 @@ fn run(args: &[String]) -> Result<(), String> {
         }
     }
 
-    if let Some(out_path) = out {
+    if truth {
+        // Every input combination and the output it should produce, so an
+        // external harness can drive the real game and diff against us.
+        let comb = bitblast::blast_combinational(&design)?;
+        let bits: u32 = design.inputs.iter().map(|p| p.width).sum();
+        if bits > 16 {
+            return Err(format!("{bits} input bits is too many to enumerate"));
+        }
+        let sim = ohmc::netlist::GateSim::new(&comb);
+        for v in 0..(1u64 << bits) {
+            // Split the flat counter across the ports, LSB-first.
+            let mut vals = Vec::new();
+            let mut rest = v;
+            for p in &design.inputs {
+                vals.push(rest & ((1u64 << p.width) - 1));
+                rest >>= p.width;
+            }
+            let outs: Vec<String> = comb
+                .outputs
+                .iter()
+                .map(|(n, _)| format!("{n}={}", sim.read_output(n, &vals, false)))
+                .collect();
+            println!("TRUTH {v} {}", outs.join(" "));
+        }
+    }
+
+    if out.is_some() || nbt_out.is_some() || mcfn_out.is_some() {
         let comb = bitblast::blast_combinational(&design).map_err(|e| {
             format!(
                 "{e}\n\
@@ -100,19 +141,60 @@ fn run(args: &[String]) -> Result<(), String> {
             )
         })?;
         let layout = layout::build(&comb)?;
-        let s = schem::Schematic::from_grid(&layout.grid);
-        let bytes = s.to_bytes().map_err(|e| e.to_string())?;
-        std::fs::write(&out_path, &bytes).map_err(|e| format!("{out_path}: {e}"))?;
-        println!(
-            "wrote {out_path}: {}x{}x{} ({} blocks, {} gates, {} levels, {} KiB)",
-            s.width,
-            s.height,
-            s.length,
-            layout.grid.len(),
-            layout.gates,
-            layout.levels,
-            bytes.len() / 1024
-        );
+
+        if let Some(out_path) = out {
+            let s = schem::Schematic::from_grid(&layout.grid);
+            let bytes = s.to_bytes().map_err(|e| e.to_string())?;
+            std::fs::write(&out_path, &bytes).map_err(|e| format!("{out_path}: {e}"))?;
+            println!(
+                "wrote {out_path}: {}x{}x{} ({} blocks, {} gates, {} levels)",
+                s.width, s.height, s.length, layout.grid.len(), layout.gates, layout.levels
+            );
+        }
+
+        if let Some(fn_path) = mcfn_out {
+            // Lift the build clear of the ground so nothing is buried.
+            let origin = (0, 1, 0);
+            let text = structure::to_mcfunction(&layout.grid, origin);
+            let lines = text.lines().filter(|l| l.starts_with("setblock")).count();
+            std::fs::write(&fn_path, &text).map_err(|e| format!("{fn_path}: {e}"))?;
+            println!("wrote {fn_path}: {lines} setblock commands");
+
+            // Port coordinates in the same relative frame as the commands, so
+            // the circuit can actually be driven and read once it is placed.
+            let lo = layout.grid.bounds().map(|(lo, _)| lo).unwrap_or((0, 0, 0));
+            let rel = |p: (i32, i32, i32)| {
+                (p.0 - lo.0 + origin.0, p.1 - lo.1 + origin.1, p.2 - lo.2 + origin.2)
+            };
+            for (name, levers) in &layout.input_levers {
+                for (bit, &p) in levers.iter().enumerate() {
+                    let r = rel(p);
+                    println!("  input  {name}[{bit}] lever at ~{} ~{} ~{}", r.0, r.1, r.2);
+                }
+            }
+            for (name, lamps) in &layout.output_lamps {
+                for (bit, &p) in lamps.iter().enumerate() {
+                    let r = rel(p);
+                    println!("  output {name}[{bit}] lamp  at ~{} ~{} ~{}", r.0, r.1, r.2);
+                }
+            }
+        }
+
+        if let Some(nbt_path) = nbt_out {
+            let s = structure::Structure::from_grid(&layout.grid);
+            if !s.fits() {
+                return Err(format!(
+                    "structure is {}x{}x{}, but a structure block only loads up to {} per axis",
+                    s.size.0, s.size.1, s.size.2, structure::MAX_AXIS
+                ));
+            }
+            let bytes = s.to_bytes().map_err(|e| e.to_string())?;
+            std::fs::write(&nbt_path, &bytes).map_err(|e| format!("{nbt_path}: {e}"))?;
+            println!(
+                "wrote {nbt_path}: {}x{}x{} ({} blocks) - load with a structure block",
+                s.size.0, s.size.1, s.size.2, s.blocks.len()
+            );
+        }
     }
     Ok(())
 }

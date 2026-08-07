@@ -176,7 +176,12 @@ impl<'g> Sim<'g> {
                 continue;
             }
             for target in self.dust_powers(p) {
-                if self.grid.get(target).conducts() {
+                // Any full block can *receive* weak power, including a lamp -
+                // which is the whole point, since that is how output ports light
+                // up. `conducts` is the narrower question of whether a block can
+                // re-emit power onto dust, and only solid blocks do that; weak
+                // power never propagates onward regardless.
+                if self.grid.get(target).is_opaque() {
                     weak.insert(target, true);
                 }
             }
@@ -410,18 +415,19 @@ impl<'g> Sim<'g> {
     }
 
     /// Read a lamp's lit state, which is how output ports are observed.
+    ///
+    /// A lamp lights when the block is *powered* - not merely when some powered
+    /// dust happens to sit next to it. Dust only powers the block beneath it and
+    /// the blocks it points into, and dust with a single connection renders as a
+    /// straight line along that one axis, so it does not point sideways at all.
+    ///
+    /// An earlier version of this returned true for any adjacent powered dust.
+    /// That was wrong, and it hid a real bug: the compiler was placing output
+    /// lamps beside a wire whose shape pointed the other way, so the circuit
+    /// worked everywhere except its final block. Testing against the actual game
+    /// is what surfaced it.
     pub fn lamp_lit(&self, p: Pos) -> bool {
-        let f = self.field();
-        if f.block_powered(p) {
-            return true;
-        }
-        // A lamp also lights from adjacent dust directly.
-        for d in Dir::ALL {
-            if f.dust_at(offset(p, d)) > 0 {
-                return true;
-            }
-        }
-        f.dust_at(up(p)) > 0 || f.dust_at(down(p)) > 0
+        self.field().block_powered(p)
     }
 }
 
