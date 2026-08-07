@@ -539,7 +539,11 @@ pub fn stamp_d_latch(
 ) -> Result<(Pos, Pos, Pos, Pos, Pos, Pos), String> {
     use crate::route::Router;
     let (x, y, z) = base;
-    const DZ: i32 = 10;
+    // Stage pitch was sized for hand-placed wiring, which needed room to climb to
+    // a lane, cross it, and descend again. The router does that job now and packs
+    // it tighter, so the old pitch is waste - and waste matters here, since gcd
+    // needs 42 of these.
+    const DZ: i32 = 8;
 
     // Gates first, then let the real router wire them.
     //
@@ -643,7 +647,7 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<(Vec<Pos>, Vec<Pos>, Pos), S
     // Measure each macro's footprint rather than guessing an offset: a caller
     // cannot see how much room a macro took.
     let end_z = |g: &Grid| g.bounds().map(|(_, hi)| hi.2).unwrap_or(z);
-    const GAP: i32 = 30;
+    const GAP: i32 = 14;
 
     let (m_da, m_db, m_ea, m_eb, m_q, _m_qn) = stamp_d_latch(g, (x, y, z))?;
     let not_clk = stamp_nor(g, (x + 20, y, end_z(g) + GAP), 1)?;
