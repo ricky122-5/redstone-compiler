@@ -26,7 +26,7 @@ cp /tmp/dff.mcfunction "$PK/data/ohm/function/circuit.mcfunction"
 # Probe every node the exporter published, not just Q: the fault is somewhere
 # along master -> inverted clock -> slave, and only the game can see inside.
 : > "$PK/data/ohm/function/probe.mcfunction"
-awk '$1=="Q"||$1=="MQ"||$1=="NCLK"{
+awk '$1!="D" && $1!="CLK"{
   printf "execute if block %s %s %s minecraft:redstone_lamp[lit=true] run say OHMC_%s ON\n", $2,$3,$4,$1
   printf "execute if block %s %s %s minecraft:redstone_lamp[lit=false] run say OHMC_%s off\n", $2,$3,$4,$1
   printf "execute unless block %s %s %s minecraft:redstone_lamp run say OHMC_%s MISSING\n", $2,$3,$4,$1
@@ -75,4 +75,4 @@ stage d0_after_edge
 send "stop" 2
 wait $SRV 2>/dev/null
 echo "=== flip-flop in real Minecraft ==="
-grep -oE "OHMC_(STAGE [a-z0-9_]+|(Q|MQ|NCLK) (ON|off|MISSING))" server.log | sed 's/OHMC_//'
+grep -oE "OHMC_(STAGE [a-z0-9_]+|[A-Z0-9]+ (ON|off|MISSING))" server.log | sed 's/OHMC_//'

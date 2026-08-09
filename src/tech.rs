@@ -651,6 +651,10 @@ pub struct DffPorts {
     pub master_q: Pos,
     /// The inverted clock, feeding the slave's enable.
     pub not_clk: Pos,
+    /// The branch points on the inverted clock's spine. `S` and `R` in the slave
+    /// are fed from different ones, so if only one branch conducts, `S` works
+    /// and `R` never asserts - which is exactly the observed symptom.
+    pub not_clk_taps: Vec<Pos>,
 }
 
 pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
@@ -693,6 +697,7 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
         q: s_q,
         master_q: m_q,
         not_clk: not_clk.out,
+        not_clk_taps: vec![nc[0], nc[3]],
     })
 }
 
@@ -955,8 +960,18 @@ mod tests {
     ///
     /// The fault is narrower than "it does not work": with the slave open and
     /// its D low, `R = NOR(D, !E)` should assert and drive Q high. It does not.
-    /// The set path works and the reset path does not, which is a claim about
-    /// one gate and one wire rather than about the whole macro.
+    /// The set path works and the reset path does not.
+    ///
+    /// `S` and `R` differ only in which branch of the inverted clock feeds them,
+    /// so a dead second branch would leave `!E` high for `R` alone and explain
+    /// the asymmetry exactly. Probing both branch points in-game rules that out:
+    /// `NCTAP0` and `NCTAP3` both read ON when they should. The clock reaches
+    /// both taps.
+    ///
+    /// So the suspect is downstream of the tap - either the routed wire from the
+    /// second tap into the slave's `not_e_r`, or that inverter itself. Probing
+    /// `not_e_r`'s output distinguishes them, and neither is a guess: the set
+    /// path proves the identical structure works one gate over.
     ///
     /// In simulation it oscillates. `examples/dff_debug.rs` names the culprits: the
     /// **master's own RS latch ring** - the two cross-coupled torches - toggling
