@@ -18,10 +18,10 @@ fn drive(g: &mut Grid, feed: Pos) -> Pos {
 
 fn main() {
     let mut g = Grid::new();
-    let (dfs, cfs, q) = stamp_dff(&mut g, (0, 0, 0)).unwrap();
-    let dl: Vec<Pos> = dfs.iter().map(|&f| drive(&mut g, f)).collect();
-    let cl: Vec<Pos> = cfs.iter().map(|&f| drive(&mut g, f)).collect();
-    println!("q={q:?} d_feeds={dfs:?} clk_feeds={cfs:?}");
+    let p = stamp_dff(&mut g, (0, 0, 0)).unwrap();
+    let dl: Vec<Pos> = p.d_feeds.iter().map(|&f| drive(&mut g, f)).collect();
+    let cl: Vec<Pos> = p.clk_feeds.iter().map(|&f| drive(&mut g, f)).collect();
+    println!("q={:?} master_q={:?} not_clk={:?}", p.q, p.master_q, p.not_clk);
 
     let mut sim = Sim::new(&g);
     for &l in &dl { sim.set_lever(l, true); }
