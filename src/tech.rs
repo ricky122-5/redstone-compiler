@@ -639,8 +639,21 @@ pub fn stamp_out_spine_dir(
 /// costs nothing, whereas fanning out inside the macro means several links
 /// leaving one output and overlapping.
 ///
-/// Returns `(d_feeds, clk_feeds, q)`.
-pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<(Vec<Pos>, Vec<Pos>, Pos), String> {
+/// Returns [`DffPorts`], which carries the two internal nodes as well as the
+/// external ones. The simulator rings on this circuit and so cannot be used to
+/// debug it; the only working instrument is the in-game harness, and that needs
+/// coordinates to probe.
+pub struct DffPorts {
+    pub d_feeds: Vec<Pos>,
+    pub clk_feeds: Vec<Pos>,
+    pub q: Pos,
+    /// The master latch's output, feeding the slave's D.
+    pub master_q: Pos,
+    /// The inverted clock, feeding the slave's enable.
+    pub not_clk: Pos,
+}
+
+pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
     use crate::route::Router;
     let (x, y, z) = base;
 
@@ -674,7 +687,13 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<(Vec<Pos>, Vec<Pos>, Pos), S
     wire(g, &mut router, 13, nc[0], s_ea)?;
     wire(g, &mut router, 14, nc[3], s_eb)?;
 
-    Ok((vec![m_da, m_db], vec![m_ea, m_eb, not_clk.feeds[0]], s_q))
+    Ok(DffPorts {
+        d_feeds: vec![m_da, m_db],
+        clk_feeds: vec![m_ea, m_eb, not_clk.feeds[0]],
+        q: s_q,
+        master_q: m_q,
+        not_clk: not_clk.out,
+    })
 }
 
 #[cfg(test)]
@@ -921,10 +940,23 @@ mod tests {
     /// simulator artifact - we deliberately do not model torch burnout, which is
     /// exactly the mechanism real redstone uses to damp a circulating pulse.
     ///
-    /// What the game does show is that Q never captures: it reads off at every
-    /// stage, including at rest, where the pinned latch should hold it high. So
-    /// the remaining fault is logic or wiring, not stability, and the simulator
-    /// cannot be used to find it while it rings on this circuit.
+    /// What the game does show is that Q never captures. Probing the internal
+    /// nodes there (`tools/dff-validate.sh` reads master-Q and the inverted
+    /// clock as well as Q) localises it:
+    ///
+    /// ```text
+    /// D=1 CLK=0    MQ=ON   NCLK=ON   Q=off     correct
+    /// D=1 CLK=1    MQ=off  NCLK=off  Q=off     correct
+    /// after edge   MQ=off  NCLK=ON   Q=off     WRONG - should be ON
+    /// ```
+    ///
+    /// Each latch's `q` is inverted - asserting *set* pulls A low - and the two
+    /// inversions cancel across master and slave, so that part is fine.
+    ///
+    /// The fault is narrower than "it does not work": with the slave open and
+    /// its D low, `R = NOR(D, !E)` should assert and drive Q high. It does not.
+    /// The set path works and the reset path does not, which is a claim about
+    /// one gate and one wire rather than about the whole macro.
     ///
     /// In simulation it oscillates. `examples/dff_debug.rs` names the culprits: the
     /// **master's own RS latch ring** - the two cross-coupled torches - toggling
@@ -947,7 +979,8 @@ mod tests {
     #[ignore = "DFF places but oscillates; enclosing gates start inconsistent"]
     fn dff_samples_on_the_clock_edge() {
         let mut g = Grid::new();
-        let (dfs, cfs, q) = stamp_dff(&mut g, (0, 0, 0)).unwrap();
+        let p = stamp_dff(&mut g, (0, 0, 0)).unwrap();
+        let (q, dfs, cfs) = (p.q, p.d_feeds, p.clk_feeds);
         let dl: Vec<Pos> = dfs.iter().map(|&f| drive(&mut g, f)).collect();
         let cl: Vec<Pos> = cfs.iter().map(|&f| drive(&mut g, f)).collect();
         let mut sim = Sim::new(&g);

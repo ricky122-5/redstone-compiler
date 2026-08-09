@@ -24,19 +24,25 @@ fn lever(g: &mut Grid, feed: Pos) -> Pos {
 fn main() {
     let out = std::env::args().nth(1).unwrap_or_else(|| "/tmp/dff.mcfunction".into());
     let mut g = Grid::new();
-    let (dfs, cfs, q) = stamp_dff(&mut g, (0, 0, 0)).unwrap();
+    let p = stamp_dff(&mut g, (0, 0, 0)).unwrap();
+    let (q, dfs, cfs) = (p.q, p.d_feeds.clone(), p.clk_feeds.clone());
     let dl: Vec<Pos> = dfs.iter().map(|&f| lever(&mut g, f)).collect();
     let cl: Vec<Pos> = cfs.iter().map(|&f| lever(&mut g, f)).collect();
-    // A lamp under Q makes the state readable the validated way.
-    g.force((q.0, q.1 - 1, q.2), Block::Lamp { lit: false });
+    // Lamps under the nodes we need to read. The simulator rings on this
+    // circuit, so the game is the only instrument that can see inside it.
+    for probe in [q, p.master_q, p.not_clk] {
+        g.force((probe.0, probe.1 - 1, probe.2), Block::Lamp { lit: false });
+    }
 
     let lo = g.bounds().unwrap().0;
     let rel = |p: Pos| (p.0 - lo.0, p.1 - lo.1 + 1, p.2 - lo.2);
     let mut man = String::new();
     for l in &dl { let r = rel(*l); man.push_str(&format!("D {} {} {}\n", r.0, r.1, r.2)); }
     for l in &cl { let r = rel(*l); man.push_str(&format!("CLK {} {} {}\n", r.0, r.1, r.2)); }
-    let r = rel((q.0, q.1 - 1, q.2));
-    man.push_str(&format!("Q {} {} {}\n", r.0, r.1, r.2));
+    for (name, probe) in [("Q", q), ("MQ", p.master_q), ("NCLK", p.not_clk)] {
+        let r = rel((probe.0, probe.1 - 1, probe.2));
+        man.push_str(&format!("{name} {} {} {}\n", r.0, r.1, r.2));
+    }
 
     std::fs::write(format!("{out}.manifest"), &man).unwrap();
     std::fs::write(&out, to_mcfunction(&g, (0, 1, 0))).unwrap();
