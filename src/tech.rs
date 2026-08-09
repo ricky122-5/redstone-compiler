@@ -673,10 +673,14 @@ pub struct DffPorts {
     pub master_q: Pos,
     /// The inverted clock, feeding the slave's enable.
     pub not_clk: Pos,
-    /// The slave's `!E` inverter output and its reset gate output - the two
-    /// remaining suspects for the dead reset path.
+    /// The slave's `!E` inverter output and its reset gate output.
     pub slave_not_e_r: Pos,
     pub slave_r_out: Pos,
+    /// The same two nodes in the master. The bare latch resets correctly in the
+    /// game, so if the master's reset is dead here the difference is the
+    /// flip-flop's wiring, not the latch.
+    pub master_not_e_r: Pos,
+    pub master_r_out: Pos,
     /// The branch points on the inverted clock's spine. `S` and `R` in the slave
     /// are fed from different ones, so if only one branch conducts, `S` works
     /// and `R` never asserts - which is exactly the observed symptom.
@@ -738,6 +742,8 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
         not_clk: not_clk.out,
         slave_not_e_r: sl.not_e_r,
         slave_r_out: sl.r_out,
+        master_not_e_r: m.not_e_r,
+        master_r_out: m.r_out,
         not_clk_taps: vec![nc[0], nc[3]],
     })
 }
@@ -1011,10 +1017,14 @@ mod tests {
     /// slave's was.
     ///
     /// The D latch itself is not the problem: driven directly in the game it
-    /// resets correctly (see `stamp_d_latch`). So the fault is in how the
-    /// flip-flop drives its master, not in the latch - most likely another
-    /// mis-charged decay, since that is what the slave's identical symptom
-    /// turned out to be.
+    /// resets correctly, both directions (see `stamp_d_latch`).
+    ///
+    /// Probing inside the D=0 capture window is inconclusive so far, and for a
+    /// harness reason rather than a circuit one: at that stage the probe reads
+    /// the inverted clock as *high*, which cannot be true while the clock itself
+    /// is high. So the clock levers had not taken when the reading was made and
+    /// the master was never opened. The measurement has to be trusted before the
+    /// circuit can be judged, and it is not yet.
     ///
     /// It also does not oscillate in the game, though the simulator says it
     /// does. We deliberately do not model torch burnout, which is exactly how

@@ -36,6 +36,8 @@ fn main() {
         ("NCLK", p.not_clk),
         ("SNOTER", p.slave_not_e_r),
         ("SROUT", p.slave_r_out),
+        ("MNOTER", p.master_not_e_r),
+        ("MROUT", p.master_r_out),
     ];
     for (i, &t) in p.not_clk_taps.iter().enumerate() {
         probes.push((if i == 0 { "NCTAP0" } else { "NCTAP3" }, t));

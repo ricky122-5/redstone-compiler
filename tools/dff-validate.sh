@@ -69,6 +69,7 @@ stage d1_after_edge
 setlev false 10 "$DS"             # drop D with the clock idle
 stage d0_clk_idle                 # Q must NOT follow
 setlev true 10 "$CS"
+stage d0_clk_high                 # inside the capture window: master must reset
 setlev false 10 "$CS"             # clock the 0 through
 stage d0_after_edge
 
