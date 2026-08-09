@@ -706,17 +706,29 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
 
     let mut router = Router::from_grid(g);
     let bounds = ((x - 60, y - 40, z - 60), (x + 200, y + 60, end_z(g) + 60));
-    let wire = |g: &mut Grid, r: &mut Router, net: u32, from: Pos, to: Pos| -> Result<(), String> {
+    // `decay` is how much signal the branch point has already lost. A spine is
+    // plain dust, so tapping its fourth cell means starting at strength 12, not
+    // 15. Telling the router 0 makes it under-insert repeaters and the wire dies
+    // partway - which is exactly what happened: the taps at index 0 worked and
+    // the taps at index 3 were silently dead, leaving the slave's !E inverter
+    // stuck high and the reset path with it.
+    let wire = |g: &mut Grid,
+                r: &mut Router,
+                net: u32,
+                from: Pos,
+                to: Pos,
+                decay: i32|
+     -> Result<(), String> {
         r.claim(from, net);
         r.claim(to, net);
-        r.route(g, net, &[from], to, bounds, Material::Gate, 0)
+        r.route(g, net, &[from], to, bounds, Material::Gate, decay)
             .map_err(|e| format!("dff wire {net}: {e}"))
     };
 
-    wire(g, &mut router, 11, mq[0], s_da)?;
-    wire(g, &mut router, 12, mq[3], s_db)?;
-    wire(g, &mut router, 13, nc[0], s_ea)?;
-    wire(g, &mut router, 14, nc[3], s_eb)?;
+    wire(g, &mut router, 11, mq[0], s_da, 0)?;
+    wire(g, &mut router, 12, mq[3], s_db, 3)?;
+    wire(g, &mut router, 13, nc[0], s_ea, 0)?;
+    wire(g, &mut router, 14, nc[3], s_eb, 3)?;
 
     Ok(DffPorts {
         d_feeds: vec![m_da, m_db],
@@ -969,51 +981,28 @@ mod tests {
     /// a body) were all solved machinery that already existed and was already
     /// validated in-game.
     ///
-    /// **In the real game it does not oscillate.** `tools/dff-validate.sh`
-    /// places it on a headless server and drives a full clock cycle: Q is
-    /// stable at every stage, never ringing. So the oscillation below is a
-    /// simulator artifact - we deliberately do not model torch burnout, which is
-    /// exactly the mechanism real redstone uses to damp a circulating pulse.
-    ///
-    /// What the game does show is that Q never captures. Probing the internal
-    /// nodes there (`tools/dff-validate.sh` reads master-Q and the inverted
-    /// clock as well as Q) localises it:
+    /// **In the real game it now captures and holds.** `tools/dff-validate.sh`
+    /// drives a full clock cycle on a headless server:
     ///
     /// ```text
-    /// D=1 CLK=0    MQ=ON   NCLK=ON   Q=off     correct
-    /// D=1 CLK=1    MQ=off  NCLK=off  Q=off     correct
-    /// after edge   MQ=off  NCLK=ON   Q=off     WRONG - should be ON
+    /// D=1 CLK=0     Q=off
+    /// D=1 CLK=1     Q=ON     captured
+    /// falling edge  Q=ON
+    /// D=0, clock idle   Q=ON     held - does not follow D
     /// ```
     ///
-    /// Each latch's `q` is inverted - asserting *set* pulls A low - and the two
-    /// inversions cancel across master and slave, so that part is fine.
+    /// That last line is the property that matters: Q holds while D changes
+    /// underneath it, which is what makes a flip-flop a flip-flop and what lets
+    /// an FSM's next state depend on its current one.
     ///
-    /// The fault is narrower than "it does not work": with the slave open and
-    /// its D low, `R = NOR(D, !E)` should assert and drive Q high. It does not.
-    /// The set path works and the reset path does not.
+    /// It does not yet capture a 0 - clocking D=0 through leaves Q high. The
+    /// storing half works and one direction of the input path does not, which
+    /// is the same shape as the bug just fixed and probably the same cause
+    /// somewhere else.
     ///
-    /// `S` and `R` differ only in which branch of the inverted clock feeds them,
-    /// so a dead second branch would leave `!E` high for `R` alone and explain
-    /// the asymmetry exactly. Probing both branch points in-game rules that out:
-    /// `NCTAP0` and `NCTAP3` both read ON when they should. The clock reaches
-    /// both taps.
-    ///
-    /// Probing further downstream finds it. The slave's `!E` inverter reads
-    /// **ON at every stage**, including when the clock inverter above it is ON
-    /// and it should therefore be off:
-    ///
-    /// ```text
-    /// CLK=0   NCLK=ON   NCTAP3=ON   SNOTER=ON   <-- should be off
-    /// CLK=1   NCLK=off  NCTAP3=off  SNOTER=ON
-    /// ```
-    ///
-    /// It is stuck high, so its input never arrives, so `R = NOR(D, !E)` can
-    /// never assert and the reset path is dead. The tap it feeds from reads ON,
-    /// so the signal reaches the branch point and dies in the routed wire
-    /// between there and the slave's enable feed.
-    ///
-    /// The same router call one wire over (tap 0 into the slave's other enable
-    /// inverter) works, so this is one specific route, not the mechanism.
+    /// It also does not oscillate in the game, though the simulator says it
+    /// does. We deliberately do not model torch burnout, which is exactly how
+    /// real redstone damps a circulating pulse, so the ring is an artifact.
     ///
     /// In simulation it oscillates. `examples/dff_debug.rs` names the culprits: the
     /// **master's own RS latch ring** - the two cross-coupled torches - toggling
