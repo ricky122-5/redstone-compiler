@@ -932,6 +932,16 @@ mod tests {
 
     /// The latch must follow D while enabled and freeze when the enable drops.
     ///
+    /// **Verified in the real game too** (`tools/dlatch-validate.sh`):
+    ///
+    /// ```text
+    /// enable=1 D=1   Q=off     set   (q is inverted: set pulls A low)
+    /// enable=1 D=0   Q=ON      reset (Q moves the other way)
+    /// enable=0 D=1   Q=ON      holds
+    /// ```
+    ///
+    /// Both directions and the hold, on hardware rather than in our model of it.
+    ///
     /// Getting here needed three fixes, each found by measurement:
     /// a stage pitch that keeps link lanes clear of feed rows, per-link Y lanes
     /// so converging links cross over rather than into each other, and
@@ -1000,17 +1010,11 @@ mod tests {
     /// **master** never captures either. Its reset path is dead the same way the
     /// slave's was.
     ///
-    /// The cause has to differ though. The slave's failure was a spine tap
-    /// charged the wrong decay; the master has no spine, and every wire inside
-    /// `stamp_d_latch` is routed from a cell output at genuine full strength. So
-    /// the remaining suspect is the D latch's own reset path - either `not_e_r`
-    /// or the R gate - which the standalone `d_latch_follows_then_holds` test
-    /// does not distinguish, because it only checks that Q *changes* and
-    /// *holds*, never that it can be driven both ways by set and by reset
-    /// specifically.
-    ///
-    /// That test should be strengthened before chasing the geometry: a unit test
-    /// that exercised reset would have caught this without a server round trip.
+    /// The D latch itself is not the problem: driven directly in the game it
+    /// resets correctly (see `stamp_d_latch`). So the fault is in how the
+    /// flip-flop drives its master, not in the latch - most likely another
+    /// mis-charged decay, since that is what the slave's identical symptom
+    /// turned out to be.
     ///
     /// It also does not oscillate in the game, though the simulator says it
     /// does. We deliberately do not model torch burnout, which is exactly how
