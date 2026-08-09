@@ -532,11 +532,24 @@ pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos), S
 /// output and overlapping; the caller is already routing a net to many feeds, so
 /// handing it two feed points costs nothing.
 ///
-/// Returns `(d_feed_a, d_feed_b, en_feed_a, en_feed_b, q, q_not)`.
-pub fn stamp_d_latch(
-    g: &mut Grid,
-    base: Pos,
-) -> Result<(Pos, Pos, Pos, Pos, Pos, Pos), String> {
+/// Returns [`DLatchPorts`]. It carries internal nodes as well as external ones
+/// because the simulator rings on anything containing this macro, so the only
+/// instrument that can see inside is the in-game harness - and that needs
+/// coordinates.
+pub struct DLatchPorts {
+    pub d_a: Pos,
+    pub d_b: Pos,
+    pub en_a: Pos,
+    pub en_b: Pos,
+    pub q: Pos,
+    pub q_not: Pos,
+    /// Output of the inverter feeding the R gate's `!E` input.
+    pub not_e_r: Pos,
+    /// The reset gate's output.
+    pub r_out: Pos,
+}
+
+pub fn stamp_d_latch(g: &mut Grid, base: Pos) -> Result<DLatchPorts, String> {
     use crate::route::Router;
     let (x, y, z) = base;
     // Stage pitch was sized for hand-placed wiring, which needed room to climb to
@@ -590,7 +603,16 @@ pub fn stamp_d_latch(
     wire(g, &mut router, 4, s_gate.out, set_feed)?;
     wire(g, &mut router, 5, r_gate.out, reset_feed)?;
 
-    Ok((not_d.feeds[0], r_gate.feeds[0], not_e_s.feeds[0], not_e_r.feeds[0], q, qn))
+    Ok(DLatchPorts {
+        d_a: not_d.feeds[0],
+        d_b: r_gate.feeds[0],
+        en_a: not_e_s.feeds[0],
+        en_b: not_e_r.feeds[0],
+        q,
+        q_not: qn,
+        not_e_r: not_e_r.out,
+        r_out: r_gate.out,
+    })
 }
 
 /// Extend a cell's output into a short spine of dust, so several links can
@@ -651,6 +673,10 @@ pub struct DffPorts {
     pub master_q: Pos,
     /// The inverted clock, feeding the slave's enable.
     pub not_clk: Pos,
+    /// The slave's `!E` inverter output and its reset gate output - the two
+    /// remaining suspects for the dead reset path.
+    pub slave_not_e_r: Pos,
+    pub slave_r_out: Pos,
     /// The branch points on the inverted clock's spine. `S` and `R` in the slave
     /// are fed from different ones, so if only one branch conducts, `S` works
     /// and `R` never asserts - which is exactly the observed symptom.
@@ -666,10 +692,11 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
     let end_z = |g: &Grid| g.bounds().map(|(_, hi)| hi.2).unwrap_or(z);
     const GAP: i32 = 14;
 
-    let (m_da, m_db, m_ea, m_eb, m_q, _m_qn) = stamp_d_latch(g, (x, y, z))?;
+    let m = stamp_d_latch(g, (x, y, z))?;
+    let (m_da, m_db, m_ea, m_eb, m_q) = (m.d_a, m.d_b, m.en_a, m.en_b, m.q);
     let not_clk = stamp_nor(g, (x + 20, y, end_z(g) + GAP), 1)?;
-    let (s_da, s_db, s_ea, s_eb, s_q, _s_qn) =
-        stamp_d_latch(g, (x, y, end_z(g) + GAP))?;
+    let sl = stamp_d_latch(g, (x, y, end_z(g) + GAP))?;
+    let (s_da, s_db, s_ea, s_eb, s_q) = (sl.d_a, sl.d_b, sl.en_a, sl.en_b, sl.q);
 
     // Master Q and the inverted clock each drive two slave inputs, so both need
     // somewhere to branch from. The latch's Q has its own feedback wiring behind
@@ -697,6 +724,8 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
         q: s_q,
         master_q: m_q,
         not_clk: not_clk.out,
+        slave_not_e_r: sl.not_e_r,
+        slave_r_out: sl.r_out,
         not_clk_taps: vec![nc[0], nc[3]],
     })
 }
@@ -899,7 +928,8 @@ mod tests {
     #[test]
     fn d_latch_follows_then_holds() {
         let mut g = Grid::new();
-        let (da, db, ea, eb, q, _qn) = stamp_d_latch(&mut g, (0, 0, 0)).unwrap();
+        let p = stamp_d_latch(&mut g, (0, 0, 0)).unwrap();
+        let (da, db, ea, eb, q) = (p.d_a, p.d_b, p.en_a, p.en_b, p.q);
         let d1 = drive(&mut g, da);
         let d2 = drive(&mut g, db);
         let e1 = drive(&mut g, ea);
@@ -968,10 +998,22 @@ mod tests {
     /// `NCTAP0` and `NCTAP3` both read ON when they should. The clock reaches
     /// both taps.
     ///
-    /// So the suspect is downstream of the tap - either the routed wire from the
-    /// second tap into the slave's `not_e_r`, or that inverter itself. Probing
-    /// `not_e_r`'s output distinguishes them, and neither is a guess: the set
-    /// path proves the identical structure works one gate over.
+    /// Probing further downstream finds it. The slave's `!E` inverter reads
+    /// **ON at every stage**, including when the clock inverter above it is ON
+    /// and it should therefore be off:
+    ///
+    /// ```text
+    /// CLK=0   NCLK=ON   NCTAP3=ON   SNOTER=ON   <-- should be off
+    /// CLK=1   NCLK=off  NCTAP3=off  SNOTER=ON
+    /// ```
+    ///
+    /// It is stuck high, so its input never arrives, so `R = NOR(D, !E)` can
+    /// never assert and the reset path is dead. The tap it feeds from reads ON,
+    /// so the signal reaches the branch point and dies in the routed wire
+    /// between there and the slave's enable feed.
+    ///
+    /// The same router call one wire over (tap 0 into the slave's other enable
+    /// inverter) works, so this is one specific route, not the mechanism.
     ///
     /// In simulation it oscillates. `examples/dff_debug.rs` names the culprits: the
     /// **master's own RS latch ring** - the two cross-coupled torches - toggling

@@ -30,7 +30,13 @@ fn main() {
     let cl: Vec<Pos> = cfs.iter().map(|&f| lever(&mut g, f)).collect();
     // Lamps under the nodes we need to read. The simulator rings on this
     // circuit, so the game is the only instrument that can see inside it.
-    let mut probes = vec![("Q", q), ("MQ", p.master_q), ("NCLK", p.not_clk)];
+    let mut probes = vec![
+        ("Q", q),
+        ("MQ", p.master_q),
+        ("NCLK", p.not_clk),
+        ("SNOTER", p.slave_not_e_r),
+        ("SROUT", p.slave_r_out),
+    ];
     for (i, &t) in p.not_clk_taps.iter().enumerate() {
         probes.push((if i == 0 { "NCTAP0" } else { "NCTAP3" }, t));
     }

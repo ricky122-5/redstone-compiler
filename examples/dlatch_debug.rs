@@ -20,7 +20,8 @@ fn drive(g: &mut Grid, feed: Pos) -> Pos {
 
 fn main() {
     let mut g = Grid::new();
-    let (da, db, ea, eb, q, qn) = stamp_d_latch(&mut g, (0, 0, 0)).unwrap();
+    let p = stamp_d_latch(&mut g, (0, 0, 0)).unwrap();
+    let (da, db, ea, eb, q, qn) = (p.d_a, p.d_b, p.en_a, p.en_b, p.q, p.q_not);
     let levers = [drive(&mut g, da), drive(&mut g, db), drive(&mut g, ea), drive(&mut g, eb)];
     println!("d_feeds {da:?} {db:?}  en_feeds {ea:?} {eb:?}  q={q:?} qn={qn:?}");
 
