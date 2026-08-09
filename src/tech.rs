@@ -995,10 +995,22 @@ mod tests {
     /// underneath it, which is what makes a flip-flop a flip-flop and what lets
     /// an FSM's next state depend on its current one.
     ///
-    /// It does not yet capture a 0 - clocking D=0 through leaves Q high. The
-    /// storing half works and one direction of the input path does not, which
-    /// is the same shape as the bug just fixed and probably the same cause
-    /// somewhere else.
+    /// It does not yet capture a 0. Probing shows why, and it is one level
+    /// earlier than Q: `MQ` stays low through the whole D=0 cycle, so the
+    /// **master** never captures either. Its reset path is dead the same way the
+    /// slave's was.
+    ///
+    /// The cause has to differ though. The slave's failure was a spine tap
+    /// charged the wrong decay; the master has no spine, and every wire inside
+    /// `stamp_d_latch` is routed from a cell output at genuine full strength. So
+    /// the remaining suspect is the D latch's own reset path - either `not_e_r`
+    /// or the R gate - which the standalone `d_latch_follows_then_holds` test
+    /// does not distinguish, because it only checks that Q *changes* and
+    /// *holds*, never that it can be driven both ways by set and by reset
+    /// specifically.
+    ///
+    /// That test should be strengthened before chasing the geometry: a unit test
+    /// that exercised reset would have caught this without a server round trip.
     ///
     /// It also does not oscillate in the game, though the simulator says it
     /// does. We deliberately do not model torch burnout, which is exactly how
