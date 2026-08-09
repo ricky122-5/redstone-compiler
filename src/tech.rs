@@ -915,7 +915,18 @@ mod tests {
     /// a body) were all solved machinery that already existed and was already
     /// validated in-game.
     ///
-    /// It oscillates instead. `examples/dff_debug.rs` names the culprits: the
+    /// **In the real game it does not oscillate.** `tools/dff-validate.sh`
+    /// places it on a headless server and drives a full clock cycle: Q is
+    /// stable at every stage, never ringing. So the oscillation below is a
+    /// simulator artifact - we deliberately do not model torch burnout, which is
+    /// exactly the mechanism real redstone uses to damp a circulating pulse.
+    ///
+    /// What the game does show is that Q never captures: it reads off at every
+    /// stage, including at rest, where the pinned latch should hold it high. So
+    /// the remaining fault is logic or wiring, not stability, and the simulator
+    /// cannot be used to find it while it rings on this circuit.
+    ///
+    /// In simulation it oscillates. `examples/dff_debug.rs` names the culprits: the
     /// **master's own RS latch ring** - the two cross-coupled torches - toggling
     /// ~260 times in 400 ticks, plus two gates in the slave.
     ///
