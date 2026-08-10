@@ -1037,6 +1037,27 @@ mod tests {
     /// between D=1 and D=0. An inverted latch satisfies that too. Every assertion
     /// here is absolute for that reason.
     ///
+    /// # Still open in the real game
+    ///
+    /// The simulator now captures both directions, and `tools/dff-validate.sh`
+    /// does not agree: in game Q never rises, and at the D=0 clock-high stage the
+    /// probe reads the inverted clock *high* while the clock levers read high.
+    /// That reading is trustworthy now - the harness reads its levers back at
+    /// every stage, so this is the circuit, not the measurement.
+    ///
+    /// The likely cause is initial state. This latch is hand-initialised (B's
+    /// torch dark, the loop repeaters powered) and the exporter does preserve
+    /// `lit=`/`powered=`, but a `.mcfunction` places blocks one `setblock` at a
+    /// time and Minecraft re-evaluates every torch and repeater as its
+    /// neighbours appear. The chosen state does not survive placement; the game
+    /// settles into whichever state the placement order produces.
+    ///
+    /// If that is right, the fix is not more careful initialisation - it is an
+    /// explicit **reset line** into the latch, so the circuit can be driven to a
+    /// known state after it is built rather than born in one. The goal for this
+    /// project already assumes one ("pulse reset, let it clock"), so the reset
+    /// has to exist regardless.
+    ///
     /// Finding it needed the simulator, which had been unusable on anything with
     /// feedback because it rang forever - and that turned out to be a missing
     /// rule rather than a broken circuit. Real redstone damps a circulating pulse
