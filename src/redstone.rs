@@ -31,26 +31,37 @@
 //! setting. Dust propagates combinationally within a tick, which is what
 //! Minecraft does for all practical purposes.
 //!
-//! We deliberately do **not** model sub-tick update ordering, torch burnout, or
+//! We model **torch burnout**, and it is load-bearing. A torch driven past
+//! roughly eight toggles in 60 game ticks goes out and stays out until it is
+//! left alone again. That is how real redstone damps a circulating pulse, and
+//! skipping it was a mistake: without it this simulator rings forever on any
+//! feedback circuit, which made it useless for debugging exactly the latches and
+//! flip-flops the compiler needs. The original justification - that generated
+//! circuits are clocked well below the burnout threshold - does not hold, because
+//! a deep NOR network glitches several times as a wavefront passes through its
+//! reconvergent paths.
+//!
+//! Burnout must be modelled as *recoverable*. A torch that stops being driven
+//! fast comes back, as it does in game when a block update re-evaluates it. An
+//! earlier version of this code pruned the toggle history only when a torch
+//! toggled, so a burnt torch could never recover and stayed pinned off forever -
+//! which reported five dead torches in the flip-flop that the game does not have.
+//!
+//! We deliberately do **not** model sub-tick update ordering or
 //! quasi-connectivity.
-//!
-//! **The justification for skipping burnout was wrong, and this is currently the
-//! leading suspect for a real divergence.** The original reasoning was that the
-//! generated circuits are synchronous and clocked well below the burnout
-//! threshold. That does not hold for combinational circuits driven by hand: a
-//! torch burns out after roughly eight toggles in 60 game ticks, and a deep NOR
-//! network with reconvergent paths glitches several times as a wavefront passes.
-//! A burned-out torch stays off, which in a NOR network pins its gate low.
-//!
-//! The symptom that points here: `examples/add2.ohm` answers correctly in-game
-//! from a freshly placed circuit, but latches once its inputs have been toggled
-//! through a few states - and this simulator, which has no burnout, never
-//! latches. See the README for what has been ruled out.
 
 use crate::world::{down, offset, up, Block, Conn, Dir, Grid, Pos};
 use std::collections::{HashMap, VecDeque};
 
 pub const MAX_POWER: u8 = 15;
+
+/// A torch burns out after this many toggles inside [`BURNOUT_WINDOW`]. It
+/// recovers once the window passes quietly, as it does in game when a block
+/// update re-evaluates it - so burnout damps a pulse rather than permanently
+/// killing the torch.
+pub const BURNOUT_TOGGLES: usize = 8;
+/// The window burnout is measured over, in redstone ticks (60 game ticks).
+pub const BURNOUT_WINDOW: u64 = 30;
 
 /// Combinational snapshot: dust levels and block power, derived from the
 /// current state of the active components.
@@ -85,6 +96,10 @@ pub struct SimState {
     pub lever_on: HashMap<Pos, bool>,
     /// Scheduled transitions: position -> (tick at which it fires, new value).
     pending: HashMap<Pos, (u64, bool)>,
+    /// When each torch last toggled, most recent first. Redstone torches burn
+    /// out if driven too fast, and that is the mechanism the real game uses to
+    /// damp a circulating pulse.
+    torch_toggles: HashMap<Pos, Vec<u64>>,
     pub tick: u64,
 }
 
@@ -364,6 +379,9 @@ impl<'g> Sim<'g> {
             match self.grid.get(p) {
                 Block::WallTorch { .. } | Block::Torch { .. } => {
                     self.state.torch_lit.insert(p, v);
+                    let hist = self.state.torch_toggles.entry(p).or_default();
+                    hist.push(now);
+                    hist.retain(|&t| now.saturating_sub(t) <= BURNOUT_WINDOW);
                 }
                 Block::Repeater { .. } => {
                     self.state.repeater_powered.insert(p, v);
@@ -377,6 +395,19 @@ impl<'g> Sim<'g> {
         // Re-evaluate every active component against the new field.
         for i in 0..self.torches.len() {
             let p = self.torches[i];
+            // A torch driven past the burnout rate goes out and stays out. This
+            // is what stops a pulse circulating forever round a non-inverting
+            // loop in the real game; without it the simulator rings on any
+            // feedback circuit and cannot be used to debug one.
+            let burned = self.state.torch_toggles.get(&p).is_some_and(|h| {
+                h.iter().filter(|&&t| now.saturating_sub(t) <= BURNOUT_WINDOW).count()
+                    >= BURNOUT_TOGGLES
+            });
+            if burned {
+                self.state.torch_lit.insert(p, false);
+                self.state.pending.remove(&p);
+                continue;
+            }
             let support = self.torch_support(p);
             let target = !f.block_powered(support);
             self.schedule(p, target, self.state.torch_lit[&p], 1, now);
@@ -404,6 +435,26 @@ impl<'g> Sim<'g> {
                 }
             }
         }
+    }
+
+    /// Torches that have burned out: driven past [`BURNOUT_TOGGLES`] inside
+    /// [`BURNOUT_WINDOW`] and now stuck off. A burned-out torch in a settled
+    /// circuit is a fault, not a transient - it will not recover on its own.
+    pub fn burned_out(&self) -> Vec<Pos> {
+        let mut v: Vec<Pos> = self
+            .state
+            .torch_toggles
+            .iter()
+            .filter(|(_, h)| {
+                h.iter()
+                    .filter(|&&t| self.state.tick.saturating_sub(t) <= BURNOUT_WINDOW)
+                    .count()
+                    >= BURNOUT_TOGGLES
+            })
+            .map(|(p, _)| *p)
+            .collect();
+        v.sort();
+        v
     }
 
     /// Run until no transitions are pending, or `limit` ticks elapse.
