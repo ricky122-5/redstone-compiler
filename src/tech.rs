@@ -507,7 +507,14 @@ pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos), S
 
     // The *second* feed of each cell is the external input; the first carries
     // the loop.
-    Ok((a.feeds[1], b.feeds[1], a.out, b.out))
+    //
+    // Q is B's output, not A's. Asserting the external input of a cross-coupled
+    // NOR drives *that cell's* output low, so the cell fed by S produces !Q. A
+    // is the cell fed by S, therefore Q = B. Returning A as Q made the whole
+    // latch invert - Q followed !D - and because A is the cell initialised high,
+    // it also made the latch power up set instead of clear. The unit test missed
+    // both: it asserted only that q and q_not differ, never which was which.
+    Ok((a.feeds[1], b.feeds[1], b.out, a.out))
 }
 
 /// A gated D latch: `Q` follows `D` while `enable` is high, and holds when it
@@ -974,11 +981,17 @@ mod tests {
         };
 
         // Transparent: Q tracks D while the enable is high.
+        //
+        // Assert the actual value, not merely that the two differ. The weaker
+        // `assert_ne!` passed for a whole session while the latch was wired
+        // inverted - Q followed !D - because an inverted latch also produces two
+        // different answers. Polarity is the thing being tested, so test it.
         set(&mut sim, true, true);
-        let q_hi = sim.field().dust_at(q) > 0;
+        assert!(sim.field().dust_at(q) > 0, "Q must be high when D=1 and enabled");
         set(&mut sim, false, true);
-        let q_lo = sim.field().dust_at(q) > 0;
-        assert_ne!(q_hi, q_lo, "Q must follow D while enabled");
+        assert!(sim.field().dust_at(q) == 0, "Q must be low when D=0 and enabled");
+        set(&mut sim, true, true);
+        assert!(sim.field().dust_at(q) > 0, "Q must return high when D goes back to 1");
 
         // Opaque: drop the enable, then change D. Q must not move.
         set(&mut sim, false, false);
@@ -990,65 +1003,50 @@ mod tests {
 
     /// A flip-flop must sample D on the clock edge and hold it, not follow D.
     ///
-    /// Now places cleanly - every geometry problem vanished at once when the
-    /// wiring was handed to `route.rs` instead of being laid by hand. Four
-    /// rounds of collisions (lanes clashing with feed rows, links crossing each
-    /// other, ramps spending their budget on height, descents landing on top of
-    /// a body) were all solved machinery that already existed and was already
-    /// validated in-game.
+    /// Places cleanly - every geometry problem vanished at once when the wiring
+    /// was handed to `route.rs` instead of being laid by hand. Four rounds of
+    /// collisions (lanes clashing with feed rows, links crossing each other,
+    /// ramps spending their budget on height, descents landing on top of a body)
+    /// were all solved by machinery that already existed and was validated
+    /// in-game.
     ///
-    /// **In the real game it now captures and holds.** `tools/dff-validate.sh`
-    /// drives a full clock cycle on a headless server:
+    /// The master is transparent while the clock is high and the slave while it
+    /// is low, so Q updates on the **falling** edge.
     ///
-    /// ```text
-    /// D=1 CLK=0     Q=off
-    /// D=1 CLK=1     Q=ON     captured
-    /// falling edge  Q=ON
-    /// D=0, clock idle   Q=ON     held - does not follow D
-    /// ```
+    /// # The bug this test now guards
     ///
-    /// That last line is the property that matters: Q holds while D changes
-    /// underneath it, which is what makes a flip-flop a flip-flop and what lets
-    /// an FSM's next state depend on its current one.
+    /// For most of a session this flip-flop could capture a 1 but not a 0, and
+    /// the search went in two wrong directions before finding it. Both are worth
+    /// recording, because both were reasonable and both were wasted effort:
     ///
-    /// It does not yet capture a 0. Probing shows why, and it is one level
-    /// earlier than Q: `MQ` stays low through the whole D=0 cycle, so the
-    /// **master** never captures either. Its reset path is dead the same way the
-    /// slave's was.
+    /// 1. *"The reset path is dead."* The probe showed `MQ` low through the
+    ///    whole D=0 cycle, so the master looked like it never captured. It was
+    ///    capturing - the port being read was inverted, so "low" was the right
+    ///    answer to the wrong question.
+    /// 2. *"The harness is lying."* It genuinely was, at least once: a probe read
+    ///    the inverted clock high while the clock itself was high. But fixing the
+    ///    harness was never going to find this, and each attempt cost ten minutes.
     ///
-    /// The D latch itself is not the problem: driven directly in the game it
-    /// resets correctly, both directions (see `stamp_d_latch`).
+    /// The actual cause was in [`stamp_rs_latch`], one level below: it returned
+    /// cell A as Q, but A is the cell fed by S, and asserting a cross-coupled
+    /// NOR's external input drives *that cell* low. So Q followed !D. Composed
+    /// into a flip-flop the two inversions cancelled for a 1 and did not for a 0,
+    /// which is exactly the shape of the symptom.
     ///
-    /// Probing inside the D=0 capture window is inconclusive so far, and for a
-    /// harness reason rather than a circuit one: at that stage the probe reads
-    /// the inverted clock as *high*, which cannot be true while the clock itself
-    /// is high. So the clock levers had not taken when the reading was made and
-    /// the master was never opened. The measurement has to be trusted before the
-    /// circuit can be judged, and it is not yet.
+    /// It survived so long because the D latch test asserted only that Q differed
+    /// between D=1 and D=0. An inverted latch satisfies that too. Every assertion
+    /// here is absolute for that reason.
     ///
-    /// It also does not oscillate in the game, though the simulator says it
-    /// does. We deliberately do not model torch burnout, which is exactly how
-    /// real redstone damps a circulating pulse, so the ring is an artifact.
+    /// Finding it needed the simulator, which had been unusable on anything with
+    /// feedback because it rang forever - and that turned out to be a missing
+    /// rule rather than a broken circuit. Real redstone damps a circulating pulse
+    /// through torch burnout; once `redstone.rs` modelled it, this settled at
+    /// every stage and the fault was visible in under a second.
     ///
-    /// In simulation it oscillates. `examples/dff_debug.rs` names the culprits: the
-    /// **master's own RS latch ring** - the two cross-coupled torches - toggling
-    /// ~260 times in 400 ticks, plus two gates in the slave.
-    ///
-    /// That is the informative part. The same latch is stable on its own, and
-    /// stable inside a standalone D latch; it only rings once its Q drives a
-    /// spine and two long routed wires. So this is not the pinning bug that was
-    /// fixed before - the ring is pinned. Something about the added load or the
-    /// routed wires' initial state is disturbing it.
-    ///
-    /// Worth checking first, cheaply: whether the repeaters the router inserts
-    /// on Q's outgoing wires start unpowered while A drives high. That exact
-    /// inconsistency - a repeater relaying a high output while itself starting
-    /// low - is what launched the circulating pulse the first time, and the fix
-    /// then was to diff the grid across the call and initialise whatever routing
-    /// added. The same treatment may be needed on output wires, not just
-    /// feedback ones.
+    /// No longer ignored. It was skipped because the flip-flop oscillated here
+    /// forever, which was the simulator missing torch burnout rather than the
+    /// circuit misbehaving; with burnout modelled it settles at every stage.
     #[test]
-    #[ignore = "DFF places but oscillates; enclosing gates start inconsistent"]
     fn dff_samples_on_the_clock_edge() {
         let mut g = Grid::new();
         let p = stamp_dff(&mut g, (0, 0, 0)).unwrap();
@@ -1068,28 +1066,35 @@ mod tests {
             assert!(ok, "did not settle after {t} ticks (d={d} clk={c})");
         };
 
-        // Clock a 1 through: raise D, pulse the clock, and Q should take it.
-        apply(&mut sim, true, false);
-        apply(&mut sim, true, true);
-        apply(&mut sim, true, false);
-        let after_one = sim.field().dust_at(q) > 0;
+        // The master is transparent while the clock is high and the slave while
+        // it is low, so Q updates on the falling edge.
+        let hi = |sim: &Sim| sim.field().dust_at(q) > 0;
 
-        // Now drop D with the clock idle. Q must NOT follow.
-        apply(&mut sim, false, false);
-        assert_eq!(
-            sim.field().dust_at(q) > 0,
-            after_one,
-            "Q must hold between clock edges, not follow D"
-        );
-
-        // Clock the 0 through; now it may change.
+        // Start from a known state rather than trusting power-up: clock a 0 in.
         apply(&mut sim, false, true);
         apply(&mut sim, false, false);
-        assert_ne!(
-            sim.field().dust_at(q) > 0,
-            after_one,
-            "Q must take the new value on the next edge"
-        );
+        assert!(!hi(&sim), "Q must be low after clocking in a 0");
+
+        // Clock a 1 through.
+        apply(&mut sim, true, true);
+        apply(&mut sim, true, false);
+        assert!(hi(&sim), "Q must be high after clocking in a 1");
+
+        // Drop D with the clock idle. Q must NOT follow.
+        apply(&mut sim, false, false);
+        assert!(hi(&sim), "Q must hold between clock edges, not follow D");
+
+        // Clock the 0 through. Asserted absolutely: the previous `assert_ne!`
+        // against the earlier reading would have accepted any change at all,
+        // and the bug this guards was the latch being wired inverted.
+        apply(&mut sim, false, true);
+        apply(&mut sim, false, false);
+        assert!(!hi(&sim), "Q must take the 0 on the next edge");
+
+        // And a 1 again, so the test covers both capture directions.
+        apply(&mut sim, true, true);
+        apply(&mut sim, true, false);
+        assert!(hi(&sim), "Q must capture a 1 after having held a 0");
     }
 
     /// A run longer than the dust budget must still deliver full strength.
