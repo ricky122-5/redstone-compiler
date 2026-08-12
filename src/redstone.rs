@@ -100,11 +100,23 @@
 //! around, which is evidence for the same underlying cause rather than a second
 //! one.
 //!
-//! Testing it does not need a code change: place the circuit, then force a block
-//! update near a frozen gate (re-place a neighbouring block) and see whether it
-//! unfreezes. If it does, the fix belongs in the exporter - place the circuit in
-//! a dependency-friendly order, or emit a pass that touches every gate once
-//! after the build.
+//! Tested by placing the circuit twice, so every `setblock` in the second pass
+//! delivers a block update to its neighbours. The result is partial and worth
+//! recording precisely: the master's `!E` inverter now freezes **off** where it
+//! previously froze **on**. One placement pass and it sticks high, two and it
+//! sticks low. The freeze itself survives both.
+//!
+//! So block updates do reach these gates and do change the outcome - the state
+//! a gate settles into depends on how the circuit was assembled - but a blanket
+//! re-place is not the fix. What stays constant is the shape: one transition,
+//! then frozen, regardless of which state it froze in. That rules out any
+//! explanation tied to a particular level being stuck.
+//!
+//! The next thing to measure is *when* it freezes rather than in what state:
+//! probe every stage with a much shorter settle time to find whether the gate is
+//! following its input late (a timing problem) or not at all (a connectivity
+//! one). The current harness waits ten seconds per stage, which is long enough
+//! to hide any amount of slowness.
 
 use crate::world::{down, offset, up, Block, Conn, Dir, Grid, Pos};
 use std::collections::{HashMap, VecDeque};

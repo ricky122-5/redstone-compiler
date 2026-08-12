@@ -67,6 +67,11 @@ setlev() { # value wait positions-as-one-string
 send "forceload add -48 -48 88 180" 2
 send "reload" 3
 send "execute positioned 0.0 0.0 0.0 run function ohm:circuit" 8
+# Place a second time. Every setblock notifies its neighbours, so a re-place
+# delivers a block update to every gate in the build. If gates are freezing
+# because the update that would make them re-evaluate never arrived, this is
+# both the test and the fix.
+send "execute positioned 0.0 0.0 0.0 run function ohm:circuit" 8
 
 stage() { send "say OHMC_STAGE $1" 1; send "function ohm:probe" 2; }
 
