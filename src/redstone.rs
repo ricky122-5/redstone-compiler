@@ -148,11 +148,20 @@
 //! By the rules at the top of this file that is impossible: a torch is lit
 //! exactly when its support is unpowered. So one of those rules is wrong or
 //! incomplete for the situation these macros create, and the next step is to
-//! find which, by building the smallest circuit that reproduces the freeze
-//! rather than continuing to bisect a 1500-block flip-flop. `conformance.rs`
-//! already has the harness for exactly that: single cells, driven in game, eight
-//! cases. This is a ninth - a NOR cell driven high then low, checked for
-//! relighting - and it is the cheapest remaining experiment by a wide margin.
+//! find which. `tools/relight-probe.sh` starts that bisection from the bottom: a
+//! single NOR cell, driven high and low three times **in one world**, and it
+//! inverts correctly every time. So the cell library is not at fault and the
+//! freeze needs composition - routed wires, output spines, or the latch macro -
+//! to appear.
+//!
+//! That distinction had never been tested, because `mc-validate.sh` creates a
+//! fresh world for every input combination. No gate it has ever checked was
+//! asked to respond to a *second* change, so a freeze on the second edge was
+//! invisible to the entire in-game suite. Any new harness should drive
+//! sequences in one world for that reason.
+//!
+//! Next rung: the same repeated-toggle treatment on a single D latch, which
+//! sits between the cell that works and the flip-flop that does not.
 
 use crate::world::{down, offset, up, Block, Conn, Dir, Grid, Pos};
 use std::collections::{HashMap, VecDeque};
