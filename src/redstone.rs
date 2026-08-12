@@ -50,27 +50,36 @@
 //! We deliberately do **not** model sub-tick update ordering or
 //! quasi-connectivity.
 //!
-//! # Repeater locking is not modelled, and is the current leading suspect
+//! # Repeater locking is not modelled - but it is not the current fault
 //!
-//! A repeater whose *side* is driven by another powered repeater (or a
-//! comparator) is **locked**: it freezes at its current output and ignores its
-//! input until the lock is released. `world.rs` writes `locked=false` when it
-//! serialises, but that is only an initial value - the game recomputes locking
-//! from the neighbours it finds, so a lock we never intended appears in the
-//! built circuit and not here.
+//! A repeater whose *side* is driven by another powered repeater is **locked**:
+//! it freezes at its current output and ignores its input. `world.rs` writes
+//! `locked=false`, but that is only an initial value; the game recomputes
+//! locking from whatever neighbours it finds, so an unintended lock would appear
+//! in the built circuit and never here.
 //!
-//! The measurement pointing at this: driving the flip-flop in game, the clock
-//! inverter goes low on the first rising clock edge and never comes back, while
-//! the harness reads all three clock levers *off*. An inverter with an
-//! unpowered input that will not relight is a frozen component, not a logic
-//! error, and the clock only toggled twice over about thirty seconds, so it is
-//! far too slow to be burnout. The clock path is where this would be expected:
-//! it carries several parallel wires and spine taps, which is exactly the
-//! geometry that puts one repeater beside another at right angles.
+//! It was the leading suspect for the flip-flop's stuck clock inverter and it is
+//! ruled out: `examples/lock_audit.rs` checks the geometry directly and finds
+//! **zero** locked repeaters across the RS latch, D latch and flip-flop (7, 29
+//! and 75 repeaters respectively). Worth keeping as a standing audit, since the
+//! router could introduce one at any time.
 //!
-//! Modelling it here would let the simulator reproduce the fault; the fix
-//! itself belongs in `route.rs`, which has to stop placing a repeater where
-//! another repeater faces its side.
+//! # What the flip-flop's clock inverter is actually doing
+//!
+//! In game the inverter goes low on the first rising clock edge and never comes
+//! back, while the harness reads all three clock levers off. The timing is the
+//! clue: it sticks at exactly the stage the master's `MQ` goes high, and it
+//! tracked the clock correctly at every stage before that. So the master's Q net
+//! is holding the clock inverter's input high - a short between two nets, not a
+//! frozen component.
+//!
+//! That it does not reproduce here means the coupling is through something this
+//! model does not represent. The candidates, in order of how likely they are to
+//! bite a circuit this shape: dust connecting diagonally up or down a step it
+//! should not, a solid block being powered by one net and energising the other,
+//! and quasi-connectivity. Narrowing it needs a geometric audit of what sits
+//! near the clock feed, in the manner of `lock_audit`, rather than another
+//! ten-minute server run.
 
 use crate::world::{down, offset, up, Block, Conn, Dir, Grid, Pos};
 use std::collections::{HashMap, VecDeque};
