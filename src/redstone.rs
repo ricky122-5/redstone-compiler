@@ -49,6 +49,28 @@
 //!
 //! We deliberately do **not** model sub-tick update ordering or
 //! quasi-connectivity.
+//!
+//! # Repeater locking is not modelled, and is the current leading suspect
+//!
+//! A repeater whose *side* is driven by another powered repeater (or a
+//! comparator) is **locked**: it freezes at its current output and ignores its
+//! input until the lock is released. `world.rs` writes `locked=false` when it
+//! serialises, but that is only an initial value - the game recomputes locking
+//! from the neighbours it finds, so a lock we never intended appears in the
+//! built circuit and not here.
+//!
+//! The measurement pointing at this: driving the flip-flop in game, the clock
+//! inverter goes low on the first rising clock edge and never comes back, while
+//! the harness reads all three clock levers *off*. An inverter with an
+//! unpowered input that will not relight is a frozen component, not a logic
+//! error, and the clock only toggled twice over about thirty seconds, so it is
+//! far too slow to be burnout. The clock path is where this would be expected:
+//! it carries several parallel wires and spine taps, which is exactly the
+//! geometry that puts one repeater beside another at right angles.
+//!
+//! Modelling it here would let the simulator reproduce the fault; the fix
+//! itself belongs in `route.rs`, which has to stop placing a repeater where
+//! another repeater faces its side.
 
 use crate::world::{down, offset, up, Block, Conn, Dir, Grid, Pos};
 use std::collections::{HashMap, VecDeque};
