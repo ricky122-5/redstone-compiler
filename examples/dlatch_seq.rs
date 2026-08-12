@@ -40,9 +40,14 @@ fn main() {
         ("open  d=1 e=1", true, true),
     ];
 
+    // Arriving strength on the two links into the latch. Whether a link
+    // *arrives* is not the question - the question is with how much margin. A
+    // link that lands on 1 here lands on 0 in game if our decay model is even
+    // slightly generous, and it would be dead in one direction only.
+    let (sf, rf) = (p.set_feed, p.reset_feed);
     println!(
-        "{:<15} {:>3} {:>3} {:>4} {:>4} {:>7} {:>6}",
-        "stage", "D", "E", "Q", "Qn", "not_e_r", "r_out"
+        "{:<15} {:>3} {:>3} {:>4} {:>4} {:>7} {:>6} {:>6} {:>6}",
+        "stage", "D", "E", "Q", "Qn", "not_e_r", "r_out", "S_arr", "R_arr"
     );
     for (name, dv, ev) in stages {
         for &l in &d {
@@ -54,7 +59,7 @@ fn main() {
         let (_, stable) = sim.run_until_stable(5000);
         let f = sim.field();
         println!(
-            "{:<15} {:>3} {:>3} {:>4} {:>4} {:>7} {:>6} {}{}",
+            "{:<15} {:>3} {:>3} {:>4} {:>4} {:>7} {:>6} {:>6} {:>6} {}{}",
             name,
             dv as u8,
             ev as u8,
@@ -62,6 +67,8 @@ fn main() {
             f.dust_at(p.q_not),
             f.dust_at(p.not_e_r),
             f.dust_at(p.r_out),
+            f.dust_at(sf),
+            f.dust_at(rf),
             if stable { "" } else { "UNSTABLE " },
             if sim.burned_out().is_empty() { "" } else { "BURNT" }
         );

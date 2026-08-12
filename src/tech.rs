@@ -565,6 +565,12 @@ pub struct DLatchPorts {
     pub q_not: Pos,
     /// Asynchronous clear: hold high to force `q` low, release to hold cleared.
     pub clr: Pos,
+    /// The two links into the latch. Exposed so their *arriving strength* can be
+    /// measured, not just whether they arrive: a link landing on 1 here lands on
+    /// 0 in game if this model's decay is even slightly generous, and it would
+    /// be dead in one direction only.
+    pub set_feed: Pos,
+    pub reset_feed: Pos,
     /// Output of the inverter feeding the R gate's `!E` input.
     pub not_e_r: Pos,
     /// The reset gate's output.
@@ -633,6 +639,8 @@ pub fn stamp_d_latch(g: &mut Grid, base: Pos) -> Result<DLatchPorts, String> {
         q,
         q_not: qn,
         clr: clr_feed,
+        set_feed,
+        reset_feed,
         not_e_r: not_e_r.out,
         r_out: r_gate.out,
     })

@@ -78,15 +78,33 @@
 //! not a broken latch. The fault is the wire into R, the routed link from
 //! `r_gate.out` to `reset_feed` in [`crate::tech::stamp_d_latch`].
 //!
-//! It works here and not there, so the divergence is in this model: most likely
-//! dust decay, where the router inserts repeaters according to a budget this
-//! simulator is more forgiving about than the game. A link that arrives at
-//! strength 1 here and 0 there looks exactly like this - dead in one direction
-//! only, because the S path is shorter than the R path.
+//! Dust decay was the obvious suspect and it is **ruled out**:
+//! `examples/dlatch_seq.rs` reports arriving strength on both links, and they
+//! land at S=8 and R=12 out of 15. The broken direction is the one with the
+//! *stronger* margin, so this is not a wire dying.
 //!
-//! The check that would settle it is measuring the arriving signal strength on
-//! that link rather than only whether it arrives, and comparing it against the
-//! game. That is cheap, and it does not need a server run to set up.
+//! What the game traces actually show, across two separate runs and three
+//! different gates, is a single pattern: **a gate responds to the first input
+//! change and then freezes.** The master's `!E` inverter goes low correctly on
+//! the first clock edge and never returns. The old per-flop clock inverter did
+//! exactly the same before it was removed. In both cases the harness reads the
+//! driving levers back at the correct values, so the input really is changing
+//! and the gate really is not following it.
+//!
+//! That shape does not fit decay, locking, or a logic error, all of which would
+//! be wrong from the first edge rather than the second. It fits a *missing block
+//! update*: a redstone torch relights only when something tells it to
+//! re-evaluate, and a circuit assembled by thousands of individual `setblock`
+//! calls can end up in a state where that notification never arrives. It is also
+//! consistent with the placement problem the reset line was added to work
+//! around, which is evidence for the same underlying cause rather than a second
+//! one.
+//!
+//! Testing it does not need a code change: place the circuit, then force a block
+//! update near a frozen gate (re-place a neighbouring block) and see whether it
+//! unfreezes. If it does, the fix belongs in the exporter - place the circuit in
+//! a dependency-friendly order, or emit a pass that touches every gate once
+//! after the build.
 
 use crate::world::{down, offset, up, Block, Conn, Dir, Grid, Pos};
 use std::collections::{HashMap, VecDeque};
