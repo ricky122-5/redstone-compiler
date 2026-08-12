@@ -530,6 +530,34 @@ pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos, Po
     Ok((a.feeds[1], b.feeds[1], b.feeds[2], b.out, a.out))
 }
 
+/// # Its ports are in the wrong place, and that is the open bug
+///
+/// `d_a` and `d_b` are the feeds of two *internal* gates - `not_d` and `r_gate` -
+/// which sit two and four Z stages deep inside the macro. So are the enables.
+/// Anything outside that wants to drive this latch has to thread a wire through
+/// the macro\'s own occupied space to reach them.
+///
+/// That is fine when the driver is a lever sitting right on the feed, which is
+/// how every passing in-game test has driven it, and it is why this latch is
+/// verified correct in Minecraft on its own. It is not fine inside
+/// [`stamp_dff`], where the master\'s Q has to reach the slave\'s buried D feeds,
+/// and that flip-flop does not work in game. Widening the gap between the two
+/// latches made it *worse*, which pins the disturbance on those links rather
+/// than on the macros being near each other.
+///
+/// Routing them over the top on a dedicated Y lane - the fix that shape of
+/// evidence points to - was tried and cannot be done as things stand: the link
+/// descends straight into the slave\'s body, because the port it is aiming for
+/// is inside the body.
+///
+/// So the fix is an interface change, not a routing change. A cell library puts
+/// its ports on the boundary; this one does not. Bringing `d`, `enable` and
+/// `clr` out to the macro\'s north face - a short internal stub per port, laid
+/// once when the macro is built and in known-clear space - would let every
+/// external connection land flat on an edge and never enter the body at all.
+/// That also removes the need to expose each input twice, since a boundary port
+/// can fan out internally where the geometry is known.
+///
 /// A gated D latch: `Q` follows `D` while `enable` is high, and holds when it
 /// falls. The storage element of a flip-flop.
 ///
