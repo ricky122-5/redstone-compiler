@@ -75,6 +75,39 @@ fn shorted_supports(g: &Grid) -> Vec<(Pos, Pos, Vec<Pos>)> {
     out
 }
 
+/// Dust pairs that connect diagonally across a Y step.
+///
+/// Redstone dust joins to dust one level up or down in an adjacent column, so
+/// two wires that neither overlap nor violate keepout can still be one net in
+/// game. Nothing in the router models this, and it is the only remaining way
+/// two macros could interact at a distance.
+fn diagonal_links(g: &Grid) -> Vec<(Pos, Pos)> {
+    let mut out = Vec::new();
+    for (&p, &b) in g.iter() {
+        if !matches!(b, Block::Dust { .. }) {
+            continue;
+        }
+        for d in [Dir::North, Dir::South, Dir::East, Dir::West] {
+            let side = offset(p, d);
+            // Upward: dust one level up in the adjacent column, reachable only
+            // if the block directly above this dust is not solid.
+            let upn = up(side);
+            if matches!(g.get(upn), Block::Dust { .. }) && !g.get(up(p)).conducts() && p < upn {
+                out.push((p, upn));
+            }
+            // Downward: dust one level down in the adjacent column, reachable
+            // only if the block above *it* is not solid.
+            let dn = down(side);
+            if matches!(g.get(dn), Block::Dust { .. }) && !g.get(side).conducts() && p < dn {
+                out.push((p, dn));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn main() {
     let cases: Vec<(&str, Box<dyn Fn(&mut Grid)>)> = vec![
         ("rs_latch", Box::new(|g: &mut Grid| {
@@ -96,11 +129,16 @@ fn main() {
         let l = locked(&g);
         total += l.len();
         let sh = shorted_supports(&g);
+        let diag = diagonal_links(&g);
         println!(
             "{name:<10} {reps:>4} repeaters, {} locked, {} shorted torch supports",
             l.len(),
             sh.len()
         );
+        println!("           {} diagonal dust links across a Y step", diag.len());
+        for (a, b) in diag.iter().take(6) {
+            println!("    {a:?} <-> {b:?}");
+        }
         for (t, sup, srcs) in sh.iter().take(6) {
             println!("    torch {t:?} support {sup:?} powered by {srcs:?}");
         }

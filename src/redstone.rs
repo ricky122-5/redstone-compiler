@@ -189,10 +189,18 @@
 //! with two large macros stacked in Z with routed wires threading between them,
 //! which is exactly the geometry that produces near-misses in Y.
 //!
-//! The audit for it is the same shape as the ones in `lock_audit`, and cheap:
-//! for every dust cell, look one level up and down at the four diagonal
-//! neighbours and report any pair that would connect but belongs to different
-//! nets.
+//! `lock_audit` now reports these, and the raw count is **not** the signal: 2 in
+//! the RS latch, 11 in the D latch, 36 in the flip-flop - and the first two work
+//! in game. Most are intentional, because a ramp climbs in Y by exactly this
+//! mechanism; the run (20,-3,83) -> (20,-2,84) -> (20,-1,85) -> (20,0,86) is a
+//! ramp doing its job.
+//!
+//! Separating accidental from intentional needs to know which *net* each dust
+//! cell belongs to, and a `Grid` does not carry that - `Router` does, in its
+//! `owner` map. So the audit has to run with the router\'s ownership in hand and
+//! flag only diagonal pairs whose two cells belong to different nets. That is
+//! the next concrete step, and it is still a local check rather than a server
+//! run.
 
 use crate::world::{down, offset, up, Block, Conn, Dir, Grid, Pos};
 use std::collections::{HashMap, VecDeque};
