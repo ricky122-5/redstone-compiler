@@ -20,7 +20,7 @@
 
 use crate::netlist::{Netlist, Sig, Src};
 use crate::route::Router;
-use crate::tech::{stamp_lamp, stamp_lever, stamp_nor, NorCell};
+use crate::tech::{stamp_dff, stamp_lamp, stamp_lever, stamp_nor, DffPorts, NorCell};
 use crate::world::{Block, Dir, Grid, Material, Pos};
 use std::collections::HashMap;
 
@@ -105,6 +105,37 @@ fn levelize(net: &Netlist, roots: &[Sig]) -> Vec<i32> {
         }
     }
     level
+}
+
+/// A bank of flip-flops, tiled so the placer can hand out one per netlist
+/// register.
+///
+/// Tiled in both X and Z rather than a single row: a flip-flop is 66x149, so 42
+/// of them side by side would be over 3000 blocks wide and every clock wire
+/// would cross the whole floorplan. A roughly square bank keeps the clock and
+/// reset spines short, which matters because both fan out to every register.
+pub struct RegisterBank {
+    pub flops: Vec<DffPorts>,
+}
+
+/// Footprint of one flip-flop macro plus clearance, measured by
+/// `examples/regbank_probe.rs`. Two macros at this pitch were verified to hold
+/// independent values on a shared clock.
+const FLOP_PITCH_X: i32 = 74;
+const FLOP_PITCH_Z: i32 = 160;
+
+/// Stamp `n` flip-flops in a bank based at `base`.
+pub fn place_register_bank(g: &mut Grid, base: Pos, n: usize) -> Result<RegisterBank, String> {
+    let (bx, by, bz) = base;
+    // Near-square, so neither spine has to span the whole bank.
+    let cols = (n as f64).sqrt().ceil().max(1.0) as usize;
+    let mut flops = Vec::with_capacity(n);
+    for i in 0..n {
+        let (cx, cz) = (i % cols, i / cols);
+        let at = (bx + cx as i32 * FLOP_PITCH_X, by, bz + cz as i32 * FLOP_PITCH_Z);
+        flops.push(stamp_dff(g, at).map_err(|e| format!("register {i}: {e}"))?);
+    }
+    Ok(RegisterBank { flops })
 }
 
 /// Place and route a purely combinational netlist.
@@ -585,6 +616,75 @@ mod tests {
     fn three_input_logic_lays_out_and_runs() {
         check(|n, i| n.maj3(i[0], i[1], i[2]), 3);
         check(|n, i| n.xor3(i[0], i[1], i[2]), 3);
+    }
+
+    /// A bank must tile without overlapping and each register must hold its own
+    /// value on a shared clock and a shared reset.
+    #[test]
+    fn register_bank_holds_independent_values() {
+        use crate::redstone::Sim;
+        use crate::world::Face;
+
+        fn drive(g: &mut Grid, feed: Pos) -> Pos {
+            let (x, y, z) = feed;
+            g.force((x, y - 1, z), Block::Solid(Material::Wire));
+            g.force((x, y, z), Block::Dust { power: 0 });
+            g.force((x, y - 1, z - 1), Block::Solid(Material::Wire));
+            g.force((x, y, z - 1), Block::Dust { power: 0 });
+            let l = (x, y, z - 2);
+            g.force((x, y - 1, z - 2), Block::Solid(Material::PortIn));
+            g.force(l, Block::Lever { face: Face::Floor, facing: Dir::North, powered: false });
+            l
+        }
+
+        let mut g = Grid::new();
+        // Three forces a second row, so the Z pitch is exercised too, not just X.
+        let bank = place_register_bank(&mut g, (0, 0, 0), 3).unwrap();
+        assert_eq!(bank.flops.len(), 3);
+
+        let d: Vec<Vec<Pos>> = bank
+            .flops
+            .iter()
+            .map(|f| f.d_feeds.iter().map(|&p| drive(&mut g, p)).collect())
+            .collect();
+        let clk: Vec<Pos> =
+            bank.flops.iter().flat_map(|f| f.clk_feeds.clone()).map(|p| drive(&mut g, p)).collect();
+        let rst: Vec<Pos> =
+            bank.flops.iter().flat_map(|f| f.clr_feeds.clone()).map(|p| drive(&mut g, p)).collect();
+
+        let mut sim = Sim::new(&g);
+        let set_all = |sim: &mut Sim, ls: &[Pos], v: bool| {
+            for &l in ls {
+                sim.set_lever(l, v);
+            }
+        };
+
+        // Pulse reset with the clock low: the built state is not the stamped one.
+        set_all(&mut sim, &clk, false);
+        set_all(&mut sim, &rst, true);
+        assert!(sim.run_until_stable(20000).1, "reset did not settle");
+        set_all(&mut sim, &rst, false);
+        assert!(sim.run_until_stable(20000).1, "reset release did not settle");
+        for (i, f) in bank.flops.iter().enumerate() {
+            assert_eq!(sim.field().dust_at(f.q), 0, "register {i} not cleared by reset");
+        }
+
+        // Load a distinct pattern and clock it in on a shared clock.
+        let pattern = [true, false, true];
+        for (i, &v) in pattern.iter().enumerate() {
+            set_all(&mut sim, &d[i], v);
+        }
+        set_all(&mut sim, &clk, true);
+        assert!(sim.run_until_stable(20000).1, "clock high did not settle");
+        set_all(&mut sim, &clk, false);
+        assert!(sim.run_until_stable(20000).1, "clock low did not settle");
+        for (i, &v) in pattern.iter().enumerate() {
+            assert_eq!(
+                sim.field().dust_at(bank.flops[i].q) > 0,
+                v,
+                "register {i} holds the wrong bit; the bank is coupling"
+            );
+        }
     }
 
     #[test]
