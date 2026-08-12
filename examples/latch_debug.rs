@@ -22,7 +22,7 @@ fn drive(g: &mut Grid, feed: Pos) -> Pos {
 
 fn main() {
     let mut g = Grid::new();
-    let (sf, rf, q, qn) = stamp_rs_latch(&mut g, (0, 0, 0)).unwrap();
+    let (sf, rf, _clr, q, qn) = stamp_rs_latch(&mut g, (0, 0, 0)).unwrap();
     let _s = drive(&mut g, sf);
     let _r = drive(&mut g, rf);
     println!("set_feed={sf:?} reset_feed={rf:?} q={q:?} qn={qn:?}");

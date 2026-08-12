@@ -440,8 +440,20 @@ pub fn link_via(
 /// wire runs straight through the other's output dust; separate Z bands give the
 /// forward link clear space, and the return link gets its own column to the west.
 ///
-/// Returns `(set_feed, reset_feed, q, q_not)`.
-pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos), String> {
+/// # Asynchronous clear
+///
+/// B takes a third fan-in used as `CLR`. Q is B's output and B is a NOR, so
+/// raising CLR pulls Q low no matter what the feedback loop is doing, and the
+/// loop re-settles cleared when CLR drops. That is the only way to put this
+/// latch into a known state in the real game: the initial `lit=`/`powered=`
+/// chosen at stamp time does survive export, but a `.mcfunction` places blocks
+/// one `setblock` at a time and Minecraft re-evaluates every torch and repeater
+/// as its neighbours appear, so the built circuit settles into whatever state
+/// the placement order produces rather than the one we picked. State has to be
+/// driven in after construction, not born in.
+///
+/// Returns `(set_feed, reset_feed, clr_feed, q, q_not)`.
+pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos, Pos), String> {
     let (x, y, z) = base;
     const DZ: i32 = 8;
     // Fan-in two, not one: each NOR takes the cross-coupled feedback on one
@@ -449,7 +461,8 @@ pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos), S
     // feedback and the external drive land on the same wire, shorted together,
     // and the latch degenerates into a follower that cannot hold anything.
     let a = stamp_nor(g, (x, y, z), 2)?;
-    let b = stamp_nor(g, (x + 6, y, z + DZ), 2)?;
+    // B gets a third input: the asynchronous clear. See the doc comment.
+    let b = stamp_nor(g, (x + 6, y, z + DZ), 3)?;
 
     // Start the loop in a state that is consistent all the way round, not just
     // at the torches.
@@ -514,7 +527,7 @@ pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos), S
     // latch invert - Q followed !D - and because A is the cell initialised high,
     // it also made the latch power up set instead of clear. The unit test missed
     // both: it asserted only that q and q_not differ, never which was which.
-    Ok((a.feeds[1], b.feeds[1], b.out, a.out))
+    Ok((a.feeds[1], b.feeds[1], b.feeds[2], b.out, a.out))
 }
 
 /// A gated D latch: `Q` follows `D` while `enable` is high, and holds when it
@@ -550,6 +563,8 @@ pub struct DLatchPorts {
     pub en_b: Pos,
     pub q: Pos,
     pub q_not: Pos,
+    /// Asynchronous clear: hold high to force `q` low, release to hold cleared.
+    pub clr: Pos,
     /// Output of the inverter feeding the R gate's `!E` input.
     pub not_e_r: Pos,
     /// The reset gate's output.
@@ -579,7 +594,7 @@ pub fn stamp_d_latch(g: &mut Grid, base: Pos) -> Result<DLatchPorts, String> {
     let not_d = stamp_nor(g, (x + 20, y, z + 2 * DZ), 1)?;
     let s_gate = stamp_nor(g, (x + 30, y, z + 3 * DZ), 2)?;
     let r_gate = stamp_nor(g, (x + 40, y, z + 4 * DZ), 2)?;
-    let (set_feed, reset_feed, q, qn) = stamp_rs_latch(g, (x + 55, y, z + 6 * DZ))?;
+    let (set_feed, reset_feed, clr_feed, q, qn) = stamp_rs_latch(g, (x + 55, y, z + 6 * DZ))?;
 
     // At rest the enable is low, so !E is high and both S = NOR(!D,!E) and
     // R = NOR(D,!E) are low. Cells are stamped with their torch lit, which would
@@ -617,6 +632,7 @@ pub fn stamp_d_latch(g: &mut Grid, base: Pos) -> Result<DLatchPorts, String> {
         en_b: not_e_r.feeds[0],
         q,
         q_not: qn,
+        clr: clr_feed,
         not_e_r: not_e_r.out,
         r_out: r_gate.out,
     })
@@ -669,12 +685,16 @@ pub fn stamp_out_spine_dir(
 /// leaving one output and overlapping.
 ///
 /// Returns [`DffPorts`], which carries the two internal nodes as well as the
-/// external ones. The simulator rings on this circuit and so cannot be used to
-/// debug it; the only working instrument is the in-game harness, and that needs
-/// coordinates to probe.
+/// external ones, so both the simulator and the in-game harness can probe
+/// inside. (The simulator used to ring on this circuit and be useless for
+/// debugging it; that was a missing burnout rule, not the circuit.)
 pub struct DffPorts {
     pub d_feeds: Vec<Pos>,
     pub clk_feeds: Vec<Pos>,
+    /// Asynchronous clear, one feed per internal latch. Both must be driven:
+    /// clearing only the slave leaves the master holding a stale value that the
+    /// next clock edge would shift straight back in.
+    pub clr_feeds: Vec<Pos>,
     pub q: Pos,
     /// The master latch's output, feeding the slave's D.
     pub master_q: Pos,
@@ -704,10 +724,10 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
     const GAP: i32 = 14;
 
     let m = stamp_d_latch(g, (x, y, z))?;
-    let (m_da, m_db, m_ea, m_eb, m_q) = (m.d_a, m.d_b, m.en_a, m.en_b, m.q);
+    let (m_da, m_db, m_ea, m_eb, m_q, m_clr) = (m.d_a, m.d_b, m.en_a, m.en_b, m.q, m.clr);
     let not_clk = stamp_nor(g, (x + 20, y, end_z(g) + GAP), 1)?;
     let sl = stamp_d_latch(g, (x, y, end_z(g) + GAP))?;
-    let (s_da, s_db, s_ea, s_eb, s_q) = (sl.d_a, sl.d_b, sl.en_a, sl.en_b, sl.q);
+    let (s_da, s_db, s_ea, s_eb, s_q, s_clr) = (sl.d_a, sl.d_b, sl.en_a, sl.en_b, sl.q, sl.clr);
 
     // Master Q and the inverted clock each drive two slave inputs, so both need
     // somewhere to branch from. The latch's Q has its own feedback wiring behind
@@ -744,6 +764,7 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
     Ok(DffPorts {
         d_feeds: vec![m_da, m_db],
         clk_feeds: vec![m_ea, m_eb, not_clk.feeds[0]],
+        clr_feeds: vec![m_clr, s_clr],
         q: s_q,
         master_q: m_q,
         not_clk: not_clk.out,
@@ -911,35 +932,47 @@ mod tests {
     #[test]
     fn rs_latch_remembers() {
         let mut g = Grid::new();
-        let (sf, rf, q, _qn) = stamp_rs_latch(&mut g, (0, 0, 0)).unwrap();
+        let (sf, rf, clr, q, _qn) = stamp_rs_latch(&mut g, (0, 0, 0)).unwrap();
         let s_lever = drive(&mut g, sf);
         let r_lever = drive(&mut g, rf);
+        let c_lever = drive(&mut g, clr);
 
         let mut sim = Sim::new(&g);
         settle(&mut sim);
+        let hi = |sim: &Sim| sim.field().dust_at(q) > 0;
 
+        // Absolute, not merely different. Asserting only that set and reset
+        // disagree is satisfied by an inverted latch too, and this cell was
+        // wired inverted for a whole session behind exactly that assertion.
         sim.set_lever(r_lever, true);
         settle(&mut sim);
-        let after_reset = sim.field().dust_at(q) > 0;
+        assert!(!hi(&sim), "reset must drive Q low");
         sim.set_lever(r_lever, false);
         settle(&mut sim);
-        assert_eq!(
-            sim.field().dust_at(q) > 0,
-            after_reset,
-            "state must survive its input dropping"
-        );
+        assert!(!hi(&sim), "cleared state must survive its input dropping");
 
         sim.set_lever(s_lever, true);
         settle(&mut sim);
-        let after_set = sim.field().dust_at(q) > 0;
-        assert_ne!(after_set, after_reset, "set and reset must reach different states");
+        assert!(hi(&sim), "set must drive Q high");
         sim.set_lever(s_lever, false);
         settle(&mut sim);
-        assert_eq!(
-            sim.field().dust_at(q) > 0,
-            after_set,
-            "the bit must be held, not merely tracked"
-        );
+        assert!(hi(&sim), "the bit must be held, not merely tracked");
+
+        // Asynchronous clear: Q must go low with set and reset both idle, and
+        // stay low once the clear is released. This is what lets a built
+        // circuit be put into a known state - the state chosen at stamp time
+        // does not survive `.mcfunction` placement.
+        sim.set_lever(c_lever, true);
+        settle(&mut sim);
+        assert!(!hi(&sim), "clear must force Q low from a set latch");
+        sim.set_lever(c_lever, false);
+        settle(&mut sim);
+        assert!(!hi(&sim), "the latch must stay cleared after the pulse ends");
+
+        // And it must still be usable afterwards.
+        sim.set_lever(s_lever, true);
+        settle(&mut sim);
+        assert!(hi(&sim), "the latch must still set after being cleared");
     }
 
 
@@ -1071,9 +1104,10 @@ mod tests {
     fn dff_samples_on_the_clock_edge() {
         let mut g = Grid::new();
         let p = stamp_dff(&mut g, (0, 0, 0)).unwrap();
-        let (q, dfs, cfs) = (p.q, p.d_feeds, p.clk_feeds);
+        let (q, dfs, cfs, rfs) = (p.q, p.d_feeds, p.clk_feeds, p.clr_feeds);
         let dl: Vec<Pos> = dfs.iter().map(|&f| drive(&mut g, f)).collect();
         let cl: Vec<Pos> = cfs.iter().map(|&f| drive(&mut g, f)).collect();
+        let rl: Vec<Pos> = rfs.iter().map(|&f| drive(&mut g, f)).collect();
         let mut sim = Sim::new(&g);
 
         let apply = |sim: &mut Sim, d: bool, c: bool| {
@@ -1091,7 +1125,41 @@ mod tests {
         // it is low, so Q updates on the falling edge.
         let hi = |sim: &Sim| sim.field().dust_at(q) > 0;
 
-        // Start from a known state rather than trusting power-up: clock a 0 in.
+        // Pulse the asynchronous reset. This is how the built circuit is put
+        // into a known state: the `lit=`/`powered=` chosen at stamp time does
+        // not survive `.mcfunction` placement, because the game re-evaluates
+        // every torch and repeater as its neighbours are placed.
+        let pulse_reset = |sim: &mut Sim| {
+            for &l in &rl {
+                sim.set_lever(l, true);
+            }
+            assert!(sim.run_until_stable(20000).1, "reset did not settle");
+            for &l in &rl {
+                sim.set_lever(l, false);
+            }
+            assert!(sim.run_until_stable(20000).1, "reset release did not settle");
+        };
+        pulse_reset(&mut sim);
+        assert!(!hi(&sim), "Q must be low after a reset pulse");
+
+        // Reset must clear a *stored* 1, with the clock idle. Reset is pulsed
+        // with the clock low on purpose: the master is transparent while the
+        // clock is high, so releasing reset there just reloads D immediately -
+        // correct for an asynchronous clear, and not a useful thing to assert.
+        apply(&mut sim, true, true);
+        apply(&mut sim, true, false);
+        assert!(hi(&sim), "precondition: a 1 is stored");
+        apply(&mut sim, false, false);
+        pulse_reset(&mut sim);
+        assert!(!hi(&sim), "a reset pulse must clear a stored 1");
+
+        // And it must clear the master too, not just the slave: if the master
+        // still held the 1, the next edge would shift it straight back in.
+        apply(&mut sim, false, true);
+        apply(&mut sim, false, false);
+        assert!(!hi(&sim), "reset must clear the master, not only the slave");
+
+        // Now clock a 0 in the ordinary way and confirm it agrees.
         apply(&mut sim, false, true);
         apply(&mut sim, false, false);
         assert!(!hi(&sim), "Q must be low after clocking in a 0");

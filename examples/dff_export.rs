@@ -1,10 +1,12 @@
 //! Export the flip-flop as a `.mcfunction` so the real game can be asked whether
 //! it works.
 //!
-//! The simulator says it oscillates. But the simulator deliberately does not
-//! model torch burnout, which is precisely the mechanism real redstone uses to
-//! damp a circulating pulse - so a ring that never dies in simulation may settle
-//! in the game. That is a difference worth measuring rather than assuming.
+//! The circuit is correct in simulation; the question this answers is whether it
+//! is correct once *placed*. A `.mcfunction` places blocks one `setblock` at a
+//! time and the game re-evaluates every torch and repeater as its neighbours
+//! appear, so the latch state chosen at stamp time does not survive placement.
+//! That is what the RST feeds are for: drive the built circuit into a known
+//! state rather than expecting it to be born in one.
 use ohmc::structure::to_mcfunction;
 use ohmc::tech::stamp_dff;
 use ohmc::world::{Block, Dir, Face, Grid, Material, Pos};
@@ -25,11 +27,12 @@ fn main() {
     let out = std::env::args().nth(1).unwrap_or_else(|| "/tmp/dff.mcfunction".into());
     let mut g = Grid::new();
     let p = stamp_dff(&mut g, (0, 0, 0)).unwrap();
-    let (q, dfs, cfs) = (p.q, p.d_feeds.clone(), p.clk_feeds.clone());
+    let (q, dfs, cfs, rfs) = (p.q, p.d_feeds.clone(), p.clk_feeds.clone(), p.clr_feeds.clone());
     let dl: Vec<Pos> = dfs.iter().map(|&f| lever(&mut g, f)).collect();
     let cl: Vec<Pos> = cfs.iter().map(|&f| lever(&mut g, f)).collect();
-    // Lamps under the nodes we need to read. The simulator rings on this
-    // circuit, so the game is the only instrument that can see inside it.
+    let rl: Vec<Pos> = rfs.iter().map(|&f| lever(&mut g, f)).collect();
+    // Lamps under the nodes we need to read, so the game can be asked the same
+    // questions the simulator answers.
     let mut probes = vec![
         ("Q", q),
         ("MQ", p.master_q),
@@ -51,6 +54,7 @@ fn main() {
     let mut man = String::new();
     for l in &dl { let r = rel(*l); man.push_str(&format!("D {} {} {}\n", r.0, r.1, r.2)); }
     for l in &cl { let r = rel(*l); man.push_str(&format!("CLK {} {} {}\n", r.0, r.1, r.2)); }
+    for l in &rl { let r = rel(*l); man.push_str(&format!("RST {} {} {}\n", r.0, r.1, r.2)); }
     for (name, probe) in &probes {
         let r = rel((probe.0, probe.1 - 1, probe.2));
         man.push_str(&format!("{name} {} {} {}\n", r.0, r.1, r.2));
