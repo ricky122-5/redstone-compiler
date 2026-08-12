@@ -112,6 +112,21 @@
 //! then frozen, regardless of which state it froze in. That rules out any
 //! explanation tied to a particular level being stuck.
 //!
+//! Driving the inputs with redstone blocks instead of `setblock`-ing levers
+//! changes nothing either - same freeze, same state - so the drive method is
+//! ruled out along with decay and locking. The lever readback confirms the
+//! input is genuinely low while the inverter output stays low with it.
+//!
+//! A torch whose support is unpowered and which stays out anyway is, by this
+//! module\'s own rules, either burnt out or supported by a block something else
+//! is powering. Burnout is now worth taking seriously rather than dismissing on
+//! the ten-second stage spacing: the harness places the whole circuit **twice**,
+//! and each pass re-places every block in it, so every torch is re-evaluated
+//! thousands of times within a few seconds during setup. That is exactly the
+//! rate that burns a torch out, and it happens before the first stage is ever
+//! probed. It also explains why one placement pass and two produce opposite
+//! frozen states.
+//!
 //! The next thing to measure is *when* it freezes rather than in what state:
 //! probe every stage with a much shorter settle time to find whether the gate is
 //! following its input late (a timing problem) or not at all (a connectivity

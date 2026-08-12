@@ -38,9 +38,8 @@ awk '$1!="D" && $1!="CLK" && $1!="RST" && $1!="CLKN"{
 # inputs took has no business reporting circuit faults - five readings this
 # session turned out to be the measurement rather than the circuit.
 awk '$1=="D"||$1=="CLK"||$1=="RST"||$1=="CLKN"{
-  printf "execute if block %s %s %s minecraft:lever[powered=true] run say OHMC_LEV_%s_%d ON\n", $2,$3,$4,$1,++n[$1]
-  printf "execute if block %s %s %s minecraft:lever[powered=false] run say OHMC_LEV_%s_%d off\n", $2,$3,$4,$1,n[$1]
-  printf "execute unless block %s %s %s minecraft:lever run say OHMC_LEV_%s_%d MISSING\n", $2,$3,$4,$1,n[$1]
+  printf "execute if block %s %s %s minecraft:redstone_block run say OHMC_LEV_%s_%d ON\n", $2,$3,$4,$1,++n[$1]
+  printf "execute if block %s %s %s minecraft:air run say OHMC_LEV_%s_%d off\n", $2,$3,$4,$1,n[$1]
 }' "$MAN" >> "$PK/data/ohm/function/probe.mcfunction"
 
 rm -f server.log cmd; mkfifo cmd; exec 3<>cmd
@@ -57,7 +56,16 @@ setlev() { # value wait positions-as-one-string
   local val=$1 wait=$2 list=$3
   while read -r p; do
     [ -n "$p" ] || continue
-    send "setblock $p minecraft:lever[face=floor,facing=north,powered=$val]" 0
+    # Drive with a redstone block rather than by re-placing a lever.
+    # `setblock`-ing a lever replaces a redstone component, and the neighbour
+    # updates that produces are not the same as flipping one - which is a prime
+    # suspect for gates that follow one change and then freeze. A redstone block
+    # appearing or vanishing is unambiguous.
+    if [ "$val" = true ]; then
+      send "setblock $p minecraft:redstone_block" 0
+    else
+      send "setblock $p minecraft:air" 0
+    fi
   done <<< "$list"
   sleep "$wait"
 }
