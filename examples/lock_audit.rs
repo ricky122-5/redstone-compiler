@@ -61,4 +61,31 @@ fn main() {
         }
     }
     println!("\n{total} locked repeater(s) total");
+
+    // What is physically touching the clock inverter's input? In game that pad
+    // stays powered once the master's Q goes high, which points at a short, and
+    // a short is something only geometry can show.
+    let mut g = Grid::new();
+    let p = stamp_dff(&mut g, (0, 0, 0)).unwrap();
+    println!("\nneighbourhood of the clock inverter feed:");
+    for &feed in &p.clk_feeds {
+        println!("  clk feed {feed:?}");
+        for dx in -2..=2i32 {
+            for dy in -2..=2i32 {
+                for dz in -2..=2i32 {
+                    if (dx, dy, dz) == (0, 0, 0) {
+                        continue;
+                    }
+                    let n = (feed.0 + dx, feed.1 + dy, feed.2 + dz);
+                    let b = g.get(n);
+                    if !matches!(b, Block::Air) {
+                        let d = dx.abs() + dy.abs() + dz.abs();
+                        if d <= 2 {
+                            println!("    {n:?} d={d} {b:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
