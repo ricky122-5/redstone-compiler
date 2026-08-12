@@ -726,6 +726,10 @@ pub struct DffPorts {
     pub q: Pos,
     /// The master latch's output, feeding the slave's D.
     pub master_q: Pos,
+    /// Where that output lands on the slave. Exposed to measure the *arriving
+    /// strength*, not just whether it arrives: this is the one path in the
+    /// flip-flop made of parts not individually verified in game.
+    pub slave_d_feeds: Vec<Pos>,
     /// The slave's `!E` inverter output and its reset gate output.
     pub slave_not_e_r: Pos,
     pub slave_r_out: Pos,
@@ -786,6 +790,7 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
         clr_feeds: vec![m_clr, s_clr],
         q: s_q,
         master_q: m_q,
+        slave_d_feeds: vec![s_da, s_db],
         slave_not_e_r: sl.not_e_r,
         slave_r_out: sl.r_out,
         master_not_e_r: m.not_e_r,
