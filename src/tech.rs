@@ -669,11 +669,36 @@ pub fn stamp_out_spine_dir(
     dir: (i32, i32),
     mat: Material,
 ) -> Result<Vec<Pos>, String> {
+    // A repeater immediately after the output, so every tap downstream of it
+    // starts from full strength again.
+    //
+    // Without it the spine is plain dust and each tap is weaker than the last.
+    // That is not merely inefficient, it is a correctness problem: the flip-flop
+    // feeds two *different* gates in the slave from two different taps, and if
+    // the far tap dies while the near one survives, the latch sees D=1 on one
+    // input and D=0 on the other. That makes S and R assert together, which is
+    // the one state the latch cannot occupy - it stops responding entirely.
+    // Measured at 11 and 7 of 15 arriving, which simulation tolerates and the
+    // game did not.
+    //
+    // A repeater outputs opposite the side it faces, so it must face *back*
+    // along the spine towards its input.
+    let facing = match dir {
+        (1, 0) => Dir::West,
+        (-1, 0) => Dir::East,
+        (0, 1) => Dir::North,
+        (0, -1) => Dir::South,
+        d => return Err(format!("spine direction {d:?} is not axis-aligned")),
+    };
     let mut cells = vec![out];
     for i in 1..=len {
         let p = (out.0 + dir.0 * i, out.1, out.2 + dir.1 * i);
         g.set((p.0, p.1 - 1, p.2), Block::Solid(mat))?;
-        g.set(p, Block::Dust { power: 0 })?;
+        if i == 1 {
+            g.set(p, Block::Repeater { facing, delay: 1, powered: false })?;
+        } else {
+            g.set(p, Block::Dust { power: 0 })?;
+        }
         cells.push(p);
     }
     Ok(cells)
@@ -781,7 +806,9 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
     };
 
     wire(g, &mut router, 11, mq[0], s_da, 0)?;
-    wire(g, &mut router, 12, mq[3], s_db, 3)?;
+    // Index 1 is the spine's refresh repeater, so index 4 is two dust cells
+    // past a full-strength source: decay 2, not 3.
+    wire(g, &mut router, 12, mq[4], s_db, 2)?;
 
     Ok(DffPorts {
         d_feeds: vec![m_da, m_db],

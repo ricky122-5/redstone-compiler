@@ -166,11 +166,33 @@
 //! moves underneath it. No freeze on the second pass, no freeze at all.
 //!
 //! So: NOR cell correct, D latch correct, flip-flop wrong. The fault is in
-//! *composing* two latches, which is a few hundred blocks rather than fifteen
-//! hundred. And the game trace names the piece: MQ goes high while the slave
-//! never responds, so the master-to-slave path - the Q output spine and the two
-//! wires it feeds - is not delivering. Everything else in the flip-flop is made
-//! of parts now verified in game.
+//! *composing* two latches.
+//!
+//! The sharpest form of the contradiction is one gate. `not_e_r`, the enable
+//! inverter, appears in both latches. In the standalone D latch it tracks its
+//! enable through a whole sequence in game. In the flip-flop **both** copies
+//! freeze after a single transition - the master\'s and the slave\'s - even
+//! though the slave\'s enable is driven straight from a lever, exactly as the
+//! standalone latch\'s is, and the harness reads that lever back at the correct
+//! value every stage.
+//!
+//! Same cell, same drive, different behaviour depending only on what else is in
+//! the world. That is not a property any per-gate explanation can have, and it
+//! is why decay, locking, drive method and probe placement all came back clean:
+//! they are all local, and this is not.
+//!
+//! What is left is interaction at a distance between the two macros. The
+//! remaining candidate this model does not represent is dust connecting
+//! *diagonally* across a Y step: two wires a level apart and one cell over do
+//! not overlap, do not violate keepout, and do not touch any torch support, but
+//! they do join into one net in game. The flip-flop is the first circuit built
+//! with two large macros stacked in Z with routed wires threading between them,
+//! which is exactly the geometry that produces near-misses in Y.
+//!
+//! The audit for it is the same shape as the ones in `lock_audit`, and cheap:
+//! for every dust cell, look one level up and down at the four diagonal
+//! neighbours and report any pair that would connect but belongs to different
+//! nets.
 
 use crate::world::{down, offset, up, Block, Conn, Dir, Grid, Pos};
 use std::collections::{HashMap, VecDeque};
