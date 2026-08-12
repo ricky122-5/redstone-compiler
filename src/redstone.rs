@@ -64,22 +64,29 @@
 //! and 75 repeaters respectively). Worth keeping as a standing audit, since the
 //! router could introduce one at any time.
 //!
-//! # What the flip-flop's clock inverter is actually doing
+//! # What the flip-flop does in game, and what is left
 //!
-//! In game the inverter goes low on the first rising clock edge and never comes
-//! back, while the harness reads all three clock levers off. The timing is the
-//! clue: it sticks at exactly the stage the master's `MQ` goes high, and it
-//! tracked the clock correctly at every stage before that. So the master's Q net
-//! is holding the clock inverter's input high - a short between two nets, not a
-//! frozen component.
+//! The per-flop clock inverter that used to stick is gone - both clock phases
+//! are inputs now - and with it the stuck-inverter symptom. In game the
+//! flip-flop resets to a known state and its master captures a 1.
 //!
-//! That it does not reproduce here means the coupling is through something this
-//! model does not represent. The candidates, in order of how likely they are to
-//! bite a circuit this shape: dust connecting diagonally up or down a step it
-//! should not, a solid block being powered by one net and energising the other,
-//! and quasi-connectivity. Narrowing it needs a geometric audit of what sits
-//! near the clock feed, in the manner of `lock_audit`, rather than another
-//! ten-minute server run.
+//! What remains is an asymmetry that names its own cause. The master **sets**
+//! but will not **reset**: MQ goes high on the clock edge with D=1 and stays
+//! high on the next edge with D=0. Meanwhile the asynchronous clear does work.
+//! CLR and R feed *the same latch cell* - B takes the loop on one input, R on
+//! the second, CLR on the third - so a cell that clears via CLR but not via R is
+//! not a broken latch. The fault is the wire into R, the routed link from
+//! `r_gate.out` to `reset_feed` in [`crate::tech::stamp_d_latch`].
+//!
+//! It works here and not there, so the divergence is in this model: most likely
+//! dust decay, where the router inserts repeaters according to a budget this
+//! simulator is more forgiving about than the game. A link that arrives at
+//! strength 1 here and 0 there looks exactly like this - dead in one direction
+//! only, because the S path is shorter than the R path.
+//!
+//! The check that would settle it is measuring the arriving signal strength on
+//! that link rather than only whether it arrives, and comparing it against the
+//! game. That is cheap, and it does not need a server run to set up.
 
 use crate::world::{down, offset, up, Block, Conn, Dir, Grid, Pos};
 use std::collections::{HashMap, VecDeque};
