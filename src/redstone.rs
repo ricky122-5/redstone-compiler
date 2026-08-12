@@ -198,9 +198,28 @@
 //! Separating accidental from intentional needs to know which *net* each dust
 //! cell belongs to, and a `Grid` does not carry that - `Router` does, in its
 //! `owner` map. So the audit has to run with the router\'s ownership in hand and
-//! flag only diagonal pairs whose two cells belong to different nets. That is
-//! the next concrete step, and it is still a local check rather than a server
-//! run.
+//! flag only diagonal pairs whose two cells belong to different nets.
+//!
+//! # The decisive experiment, and what it inverted
+//!
+//! The obvious reading of "one gate, two behaviours" is that the two latch
+//! macros interfere, so the flip-flop was rebuilt with the gap between them
+//! widened from 14 to 60 and driven in game. It got **worse**: the master
+//! stopped capturing at all, though its own structure and its lever-driven
+//! inputs were untouched and only the slave moved.
+//!
+//! The only thing that scales with that constant is the length of the two
+//! routed links from the master\'s Q spine to the slave\'s D feeds. Longer links,
+//! more damage. So the disturbance comes from the *links*, not from the macros
+//! being near each other - which also explains why the D latch is fine alone
+//! (its links are all internal and short) and why every static audit came back
+//! clean (they check for overlap and adjacency, not for whatever a long routed
+//! wire does as it threads past a macro).
+//!
+//! That reframes the fix. Rather than hunting the mechanism, give these links
+//! nowhere to do harm: route the master-to-slave connection on a dedicated Y
+//! layer above both macros, the way the D latch\'s own crossing problem was
+//! solved, instead of letting the maze router thread it through occupied space.
 
 use crate::world::{down, offset, up, Block, Conn, Dir, Grid, Pos};
 use std::collections::{HashMap, VecDeque};

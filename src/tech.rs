@@ -772,6 +772,15 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
     // Measure each macro's footprint rather than guessing an offset: a caller
     // cannot see how much room a macro took.
     let end_z = |g: &Grid| g.bounds().map(|(_, hi)| hi.2).unwrap_or(z);
+    // Kept tight on purpose. Widening this to 60 was tried in game to test
+    // whether the two latches interfere, and it made things *worse*: the master
+    // stopped capturing at all, even though its own structure and its
+    // lever-driven inputs were unchanged and only the slave moved.
+    //
+    // The one thing that scales with this constant is the length of the two
+    // routed links from the master's Q spine to the slave's D feeds. Longer
+    // links, more damage - so the links are what disturb the circuit, not the
+    // proximity of the two macros.
     const GAP: i32 = 14;
 
     let m = stamp_d_latch(g, (x, y, z))?;
