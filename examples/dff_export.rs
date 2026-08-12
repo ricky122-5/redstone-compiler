@@ -28,23 +28,21 @@ fn main() {
     let mut g = Grid::new();
     let p = stamp_dff(&mut g, (0, 0, 0)).unwrap();
     let (q, dfs, cfs, rfs) = (p.q, p.d_feeds.clone(), p.clk_feeds.clone(), p.clr_feeds.clone());
+    let nfs = p.clk_n_feeds.clone();
     let dl: Vec<Pos> = dfs.iter().map(|&f| lever(&mut g, f)).collect();
     let cl: Vec<Pos> = cfs.iter().map(|&f| lever(&mut g, f)).collect();
     let rl: Vec<Pos> = rfs.iter().map(|&f| lever(&mut g, f)).collect();
+    let nl: Vec<Pos> = nfs.iter().map(|&f| lever(&mut g, f)).collect();
     // Lamps under the nodes we need to read, so the game can be asked the same
     // questions the simulator answers.
-    let mut probes = vec![
+    let probes = vec![
         ("Q", q),
         ("MQ", p.master_q),
-        ("NCLK", p.not_clk),
         ("SNOTER", p.slave_not_e_r),
         ("SROUT", p.slave_r_out),
         ("MNOTER", p.master_not_e_r),
         ("MROUT", p.master_r_out),
     ];
-    for (i, &t) in p.not_clk_taps.iter().enumerate() {
-        probes.push((if i == 0 { "NCTAP0" } else { "NCTAP3" }, t));
-    }
     for (_, probe) in &probes {
         g.force((probe.0, probe.1 - 1, probe.2), Block::Lamp { lit: false });
     }
@@ -55,6 +53,7 @@ fn main() {
     for l in &dl { let r = rel(*l); man.push_str(&format!("D {} {} {}\n", r.0, r.1, r.2)); }
     for l in &cl { let r = rel(*l); man.push_str(&format!("CLK {} {} {}\n", r.0, r.1, r.2)); }
     for l in &rl { let r = rel(*l); man.push_str(&format!("RST {} {} {}\n", r.0, r.1, r.2)); }
+    for l in &nl { let r = rel(*l); man.push_str(&format!("CLKN {} {} {}\n", r.0, r.1, r.2)); }
     for (name, probe) in &probes {
         let r = rel((probe.0, probe.1 - 1, probe.2));
         man.push_str(&format!("{name} {} {} {}\n", r.0, r.1, r.2));

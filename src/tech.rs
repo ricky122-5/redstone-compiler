@@ -684,13 +684,33 @@ pub fn stamp_out_spine_dir(
 /// costs nothing, whereas fanning out inside the macro means several links
 /// leaving one output and overlapping.
 ///
-/// Returns [`DffPorts`], which carries the two internal nodes as well as the
+/// # Two-phase clock
+///
+/// The slave's enable is an **input**, not something each flip-flop derives by
+/// inverting the clock. Every flip-flop used to carry its own inverter, which
+/// meant 42 of them in `gcd` all computing the same signal - and in game that
+/// inverter was the component that failed: it went low on the first rising edge
+/// and never came back, with every clock lever reading off.
+///
+/// Taking both phases from outside removes the failing part and 42 gates with
+/// it, and matches how real sequential logic is clocked. The cost is that the
+/// two phases must not overlap: if the master and slave are transparent at the
+/// same instant, data races straight through both latches instead of being
+/// held for an edge. Generating them from one global source is what keeps that
+/// guarantee, and it is now the clock distribution's job rather than each
+/// flip-flop's.
+///
+/// Returns [`DffPorts`], which carries the internal nodes as well as the
 /// external ones, so both the simulator and the in-game harness can probe
 /// inside. (The simulator used to ring on this circuit and be useless for
 /// debugging it; that was a missing burnout rule, not the circuit.)
 pub struct DffPorts {
     pub d_feeds: Vec<Pos>,
+    /// Master enable: transparent while this is high.
     pub clk_feeds: Vec<Pos>,
+    /// Slave enable, the opposite clock phase. Supplied externally rather than
+    /// inverted inside each flip-flop - see the struct docs.
+    pub clk_n_feeds: Vec<Pos>,
     /// Asynchronous clear, one feed per internal latch. Both must be driven:
     /// clearing only the slave leaves the master holding a stale value that the
     /// next clock edge would shift straight back in.
@@ -698,8 +718,6 @@ pub struct DffPorts {
     pub q: Pos,
     /// The master latch's output, feeding the slave's D.
     pub master_q: Pos,
-    /// The inverted clock, feeding the slave's enable.
-    pub not_clk: Pos,
     /// The slave's `!E` inverter output and its reset gate output.
     pub slave_not_e_r: Pos,
     pub slave_r_out: Pos,
@@ -708,10 +726,6 @@ pub struct DffPorts {
     /// flip-flop's wiring, not the latch.
     pub master_not_e_r: Pos,
     pub master_r_out: Pos,
-    /// The branch points on the inverted clock's spine. `S` and `R` in the slave
-    /// are fed from different ones, so if only one branch conducts, `S` works
-    /// and `R` never asserts - which is exactly the observed symptom.
-    pub not_clk_taps: Vec<Pos>,
 }
 
 pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
@@ -725,7 +739,6 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
 
     let m = stamp_d_latch(g, (x, y, z))?;
     let (m_da, m_db, m_ea, m_eb, m_q, m_clr) = (m.d_a, m.d_b, m.en_a, m.en_b, m.q, m.clr);
-    let not_clk = stamp_nor(g, (x + 20, y, end_z(g) + GAP), 1)?;
     let sl = stamp_d_latch(g, (x, y, end_z(g) + GAP))?;
     let (s_da, s_db, s_ea, s_eb, s_q, s_clr) = (sl.d_a, sl.d_b, sl.en_a, sl.en_b, sl.q, sl.clr);
 
@@ -733,7 +746,6 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
     // somewhere to branch from. The latch's Q has its own feedback wiring behind
     // it in Z, so that spine runs sideways.
     let mq = stamp_out_spine_dir(g, m_q, 4, (1, 0), Material::Gate)?;
-    let nc = stamp_out_spine(g, not_clk.out, 4, Material::Gate)?;
 
     let mut router = Router::from_grid(g);
     let bounds = ((x - 60, y - 40, z - 60), (x + 200, y + 60, end_z(g) + 60));
@@ -758,21 +770,18 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
 
     wire(g, &mut router, 11, mq[0], s_da, 0)?;
     wire(g, &mut router, 12, mq[3], s_db, 3)?;
-    wire(g, &mut router, 13, nc[0], s_ea, 0)?;
-    wire(g, &mut router, 14, nc[3], s_eb, 3)?;
 
     Ok(DffPorts {
         d_feeds: vec![m_da, m_db],
-        clk_feeds: vec![m_ea, m_eb, not_clk.feeds[0]],
+        clk_feeds: vec![m_ea, m_eb],
+        clk_n_feeds: vec![s_ea, s_eb],
         clr_feeds: vec![m_clr, s_clr],
         q: s_q,
         master_q: m_q,
-        not_clk: not_clk.out,
         slave_not_e_r: sl.not_e_r,
         slave_r_out: sl.r_out,
         master_not_e_r: m.not_e_r,
         master_r_out: m.r_out,
-        not_clk_taps: vec![nc[0], nc[3]],
     })
 }
 
@@ -1104,10 +1113,13 @@ mod tests {
     fn dff_samples_on_the_clock_edge() {
         let mut g = Grid::new();
         let p = stamp_dff(&mut g, (0, 0, 0)).unwrap();
-        let (q, dfs, cfs, rfs) = (p.q, p.d_feeds, p.clk_feeds, p.clr_feeds);
+        let (q, dfs, cfs, rfs) = (p.q, p.d_feeds.clone(), p.clk_feeds.clone(), p.clr_feeds.clone());
         let dl: Vec<Pos> = dfs.iter().map(|&f| drive(&mut g, f)).collect();
         let cl: Vec<Pos> = cfs.iter().map(|&f| drive(&mut g, f)).collect();
         let rl: Vec<Pos> = rfs.iter().map(|&f| drive(&mut g, f)).collect();
+        // The second clock phase. Driven as the exact complement here; keeping
+        // the two non-overlapping is the clock distribution's job.
+        let nl: Vec<Pos> = p.clk_n_feeds.iter().map(|&f| drive(&mut g, f)).collect();
         let mut sim = Sim::new(&g);
 
         let apply = |sim: &mut Sim, d: bool, c: bool| {
@@ -1116,6 +1128,9 @@ mod tests {
             }
             for &l in &cl {
                 sim.set_lever(l, c);
+            }
+            for &l in &nl {
+                sim.set_lever(l, !c);
             }
             let (t, ok) = sim.run_until_stable(20000);
             assert!(ok, "did not settle after {t} ticks (d={d} clk={c})");

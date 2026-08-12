@@ -649,6 +649,10 @@ mod tests {
             .collect();
         let clk: Vec<Pos> =
             bank.flops.iter().flat_map(|f| f.clk_feeds.clone()).map(|p| drive(&mut g, p)).collect();
+        // Second clock phase. Every flip-flop takes both from outside rather
+        // than inverting internally, so the bank needs two spines, not one.
+        let clkn: Vec<Pos> =
+            bank.flops.iter().flat_map(|f| f.clk_n_feeds.clone()).map(|p| drive(&mut g, p)).collect();
         let rst: Vec<Pos> =
             bank.flops.iter().flat_map(|f| f.clr_feeds.clone()).map(|p| drive(&mut g, p)).collect();
 
@@ -661,6 +665,7 @@ mod tests {
 
         // Pulse reset with the clock low: the built state is not the stamped one.
         set_all(&mut sim, &clk, false);
+        set_all(&mut sim, &clkn, true);
         set_all(&mut sim, &rst, true);
         assert!(sim.run_until_stable(20000).1, "reset did not settle");
         set_all(&mut sim, &rst, false);
@@ -675,8 +680,10 @@ mod tests {
             set_all(&mut sim, &d[i], v);
         }
         set_all(&mut sim, &clk, true);
+        set_all(&mut sim, &clkn, false);
         assert!(sim.run_until_stable(20000).1, "clock high did not settle");
         set_all(&mut sim, &clk, false);
+        set_all(&mut sim, &clkn, true);
         assert!(sim.run_until_stable(20000).1, "clock low did not settle");
         for (i, &v) in pattern.iter().enumerate() {
             assert_eq!(

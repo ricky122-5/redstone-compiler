@@ -21,11 +21,13 @@ fn main() {
     let p = stamp_dff(&mut g, (0, 0, 0)).unwrap();
     let dl: Vec<Pos> = p.d_feeds.iter().map(|&f| drive(&mut g, f)).collect();
     let cl: Vec<Pos> = p.clk_feeds.iter().map(|&f| drive(&mut g, f)).collect();
-    println!("q={:?} master_q={:?} not_clk={:?}", p.q, p.master_q, p.not_clk);
+    let nl: Vec<Pos> = p.clk_n_feeds.iter().map(|&f| drive(&mut g, f)).collect();
+    println!("q={:?} master_q={:?}", p.q, p.master_q);
 
     let mut sim = Sim::new(&g);
     for &l in &dl { sim.set_lever(l, true); }
     for &l in &cl { sim.set_lever(l, false); }
+    for &l in &nl { sim.set_lever(l, true); }
 
     let mut prev = sim.state.torch_lit.clone();
     let mut churn: HashMap<Pos, u32> = HashMap::new();
