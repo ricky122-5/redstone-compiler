@@ -30,6 +30,18 @@ fn main() {
     let nl: Vec<Pos> = p.clk_n_feeds.iter().map(|&f| drive(&mut g, f)).collect();
     let rl: Vec<Pos> = p.clr_feeds.iter().map(|&f| drive(&mut g, f)).collect();
 
+    // Insert the *same* probe lamps the exporter does, replacing each node's
+    // support block. A lamp is not an ordinary conductor, so this is a circuit
+    // modification and not a passive measurement - and the simulator has never
+    // been run with them present. If the freeze seen in game reproduces here,
+    // the probes are the fault rather than the flip-flop.
+    if std::env::args().any(|a| a == "--probes") {
+        for probe in [p.q, p.master_q, p.slave_not_e_r, p.slave_r_out, p.master_not_e_r, p.master_r_out] {
+            g.force((probe.0, probe.1 - 1, probe.2), Block::Lamp { lit: false });
+        }
+        println!("[probe lamps inserted, as dff_export does]");
+    }
+
     let mut sim = Sim::new(&g);
     // The same stages the in-game script drives, in the same order.
     let stages: [(&str, bool, bool); 6] = [

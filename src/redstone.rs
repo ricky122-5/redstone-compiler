@@ -127,11 +127,32 @@
 //! probed. It also explains why one placement pass and two produce opposite
 //! frozen states.
 //!
-//! The next thing to measure is *when* it freezes rather than in what state:
-//! probe every stage with a much shorter settle time to find whether the gate is
-//! following its input late (a timing problem) or not at all (a connectivity
-//! one). The current harness waits ten seconds per stage, which is long enough
-//! to hide any amount of slowness.
+//! # What has been ruled out, and what that leaves
+//!
+//! Six explanations, each killed by a local check rather than a server run:
+//!
+//! | Hypothesis | How it died |
+//! |---|---|
+//! | repeater locking | `lock_audit`: zero locked repeaters |
+//! | dust decay on the R link | `dlatch_seq`: arrives at 12/15, stronger than the working S link at 8 |
+//! | missing block updates | placing twice flips *which* state it freezes in, not the freeze |
+//! | the harness drive method | redstone blocks behave identically to levers |
+//! | probe lamps perturbing the circuit | no behaviour change in simulation |
+//! | probe lamps landing on a torch support | `lock_audit`: none do |
+//!
+//! The geometry is clean by every static check available, and the circuit is
+//! correct in simulation. Meanwhile the game shows a gate whose input is
+//! *demonstrably* low - the harness reads the driving lever back at every stage -
+//! whose torch is out and will not relight.
+//!
+//! By the rules at the top of this file that is impossible: a torch is lit
+//! exactly when its support is unpowered. So one of those rules is wrong or
+//! incomplete for the situation these macros create, and the next step is to
+//! find which, by building the smallest circuit that reproduces the freeze
+//! rather than continuing to bisect a 1500-block flip-flop. `conformance.rs`
+//! already has the harness for exactly that: single cells, driven in game, eight
+//! cases. This is a ninth - a NOR cell driven high then low, checked for
+//! relighting - and it is the cheapest remaining experiment by a wide margin.
 
 use crate::world::{down, offset, up, Block, Conn, Dir, Grid, Pos};
 use std::collections::{HashMap, VecDeque};
