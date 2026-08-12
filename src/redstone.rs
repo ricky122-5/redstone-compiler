@@ -160,8 +160,17 @@
 //! invisible to the entire in-game suite. Any new harness should drive
 //! sequences in one world for that reason.
 //!
-//! Next rung: the same repeated-toggle treatment on a single D latch, which
-//! sits between the cell that works and the flip-flop that does not.
+//! The next rung up settles it. `tools/dlatch-seq-probe.sh` drives a single D
+//! latch through a full sequence in one world and it is **correct**: Q follows D
+//! high, low, high, low, then holds when the enable drops and stays put while D
+//! moves underneath it. No freeze on the second pass, no freeze at all.
+//!
+//! So: NOR cell correct, D latch correct, flip-flop wrong. The fault is in
+//! *composing* two latches, which is a few hundred blocks rather than fifteen
+//! hundred. And the game trace names the piece: MQ goes high while the slave
+//! never responds, so the master-to-slave path - the Q output spine and the two
+//! wires it feeds - is not delivering. Everything else in the flip-flop is made
+//! of parts now verified in game.
 
 use crate::world::{down, offset, up, Block, Conn, Dir, Grid, Pos};
 use std::collections::{HashMap, VecDeque};
