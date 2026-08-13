@@ -73,6 +73,14 @@ JAVA="$HOME/Library/Application Support/minecraft/runtime/java-runtime-delta/mac
 [ -x "$JAVA" ] || JAVA=java
 
 echo "eula=true" > eula.txt
+# pause-when-empty-seconds is the single most important line here. Modern
+# servers pause the world 60 seconds after starting with no players online.
+# Commands still run - setblock changes blocks, probes read states - but game
+# ticks stop, so every torch and repeater freezes at whatever state it held.
+# With a headless harness no player ever joins, so any run longer than a minute
+# silently stops computing partway through. That one default produced every
+# "gate responds once then freezes forever" reading in this project's history
+# and cost days of debugging a circuit that was never broken.
 cat > server.properties <<'EOF'
 level-type=minecraft\:flat
 gamemode=creative
@@ -82,6 +90,7 @@ max-tick-time=-1
 spawn-npcs=false
 spawn-animals=false
 spawn-monsters=false
+pause-when-empty-seconds=-1
 EOF
 
 # Wipe the world on every run. Circuits are placed at fixed coordinates, so

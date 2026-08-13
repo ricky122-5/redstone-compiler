@@ -57,6 +57,33 @@
 //! We deliberately do **not** model sub-tick update ordering or
 //! quasi-connectivity.
 //!
+//! # The freeze was never in the circuit: the server pauses without players
+//!
+//! Every "component follows one or two transitions and then freezes forever"
+//! reading this project ever produced had one cause, and it was not redstone.
+//! Modern servers ship `pause-when-empty-seconds=60`: sixty seconds after
+//! starting with no player online, the world **pauses**. Console commands still
+//! execute - `setblock` changes blocks, probe functions read states - but game
+//! ticks stop, so every torch and repeater freezes at whatever state it held.
+//! Dust still conducts (it has no scheduled tick), which made the freeze look
+//! exactly like a component fault partway down a wire.
+//!
+//! The proof was in the timestamps: setblock #4 at start+54s propagated,
+//! setblock #5 at start+64s did not, across a fresh-world run whose levers read
+//! back correctly the whole way. With `pause-when-empty-seconds=-1` the same
+//! world, same circuit, same sequence passes every stage - the D latch's RS
+//! loop flips a third, fourth, fifth time exactly as the simulator says.
+//!
+//! Why it masqueraded so well: every small bring-up test (a NOR cell, a
+//! repeater chain, a fan-out pair) finished inside sixty seconds and passed,
+//! while every sequential test crossed the line mid-run and "froze" - which
+//! looked precisely like complexity-dependent circuit failure. And because
+//! `mc-validate.sh` boots a fresh world per input combination, each case reset
+//! the clock, so the combinational suite never hit it at all.
+//!
+//! The harnesses now write `pause-when-empty-seconds=-1`. Nothing in this
+//! module needed to change; the model was right about all of it.
+//!
 //! # Repeater orientation is verified against the game
 //!
 //! A repeater's output is `opposite(facing)`: `facing=North` drives the +Z end.

@@ -77,6 +77,39 @@ fn main() {
     };
     for (_, q) in probes.iter().copied() { g.force((q.0, q.1 - 1, q.2), Block::Lamp { lit: false }); }
 
+    // With OHMC_TRACE_EN set, publish every cell of the enable net so the
+    // harness can probe the wire itself by blockstate - no lamps, no circuit
+    // modification. Every probe so far has been at a named node; the pair of
+    // adjacent cells where the signal actually dies has never been observed.
+    let mut en_cells: Vec<(Pos, bool)> = Vec::new(); // (cell, is_repeater)
+    if std::env::var("OHMC_TRACE_EN").is_ok() {
+        use ohmc::world::offset;
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![p.en];
+        while let Some(q) = stack.pop() {
+            if !seen.insert(q) {
+                continue;
+            }
+            match g.get(q) {
+                Block::Dust { .. } => {
+                    en_cells.push((q, false));
+                    for d in ohmc::world::Dir::ALL {
+                        let n = offset(q, d);
+                        stack.push(n);
+                        stack.push((n.0, n.1 + 1, n.2));
+                        stack.push((n.0, n.1 - 1, n.2));
+                    }
+                }
+                Block::Repeater { facing, .. } => {
+                    en_cells.push((q, true));
+                    stack.push(offset(q, facing.opposite()));
+                }
+                _ => {}
+            }
+        }
+        en_cells.sort_by_key(|&((x, y, z), _)| (z, x, y));
+    }
+
     let lo = g.bounds().unwrap().0;
     let rel = |q: Pos| (q.0 - lo.0, q.1 - lo.1 + 1, q.2 - lo.2);
     let mut man = String::new();
@@ -86,6 +119,38 @@ fn main() {
     for f in [p.d] { let r = rel((f.0, f.1, f.2 - 2)); man.push_str(&format!("D {} {} {}\n", r.0, r.1, r.2)); }
     for f in [p.en] { let r = rel((f.0, f.1, f.2 - 2)); man.push_str(&format!("CLK {} {} {}\n", r.0, r.1, r.2)); }
     for (n, q) in probes.iter().copied() { let r = rel((q.0, q.1 - 1, q.2)); man.push_str(&format!("{n} {} {} {}\n", r.0, r.1, r.2)); }
+    // With OHMC_TRACE_STATE set, publish every torch and repeater in the
+    // grid. Torches are the gates and the loop; repeaters are the delay
+    // elements. Probing them by blockstate is a full register dump per stage
+    // with zero circuit modification - the instrument the lamp probes never
+    // were.
+    if std::env::var("OHMC_TRACE_STATE").is_ok() {
+        let mut torches = Vec::new();
+        let mut reps = Vec::new();
+        for (&q, &b) in g.iter() {
+            match b {
+                Block::WallTorch { .. } | Block::Torch { .. } => torches.push(q),
+                Block::Repeater { .. } => reps.push(q),
+                _ => {}
+            }
+        }
+        torches.sort();
+        reps.sort();
+        for (i, t) in torches.iter().enumerate() {
+            let r = rel(*t);
+            man.push_str(&format!("T{i} {} {} {}\n", r.0, r.1, r.2));
+            eprintln!("T{i} = grid {t:?}");
+        }
+        for (i, t) in reps.iter().enumerate() {
+            let r = rel(*t);
+            man.push_str(&format!("R{i} {} {} {}\n", r.0, r.1, r.2));
+        }
+    }
+    for (i, (c, is_rep)) in en_cells.iter().enumerate() {
+        let r = rel(*c);
+        let kind = if *is_rep { "ER" } else { "EW" };
+        man.push_str(&format!("{kind}{i} {} {} {}\n", r.0, r.1, r.2));
+    }
     std::fs::write(format!("{out}.manifest"), &man).unwrap();
     std::fs::write(&out, to_mcfunction(&g, (0, 1, 0))).unwrap();
     eprintln!("{man}blocks={}", g.len());

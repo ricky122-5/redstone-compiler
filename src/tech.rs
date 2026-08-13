@@ -541,9 +541,18 @@ pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos, Po
 /// weak or shorted; its target dust was resting on a repeater, which in
 /// Minecraft is not a placement at all.
 ///
-/// The flip-flop built from two of these is still wrong in game: the master
-/// captures a 1 and resets on the asynchronous clear, but will not take a 0 from
-/// D, and Q never rises.
+/// The flip-flop built from two of these is **verified in unmodified
+/// Minecraft**: pulse reset, capture a 1 on the falling edge, hold while D
+/// drops with the clock idle, capture the 0 on the next edge. Every reading
+/// below that said otherwise was the server pausing, not the circuit - see the
+/// `pause-when-empty-seconds` section in `redstone.rs`.
+///
+/// What follows is the history of that hunt, kept because the instruments it
+/// built (blockstate tracing, lever readback, the bisection ladder) are the
+/// reason the real cause was findable at all.
+///
+/// It looked like this: the master captured a 1 and reset on the asynchronous
+/// clear, but would not take a 0 from D, and Q never rose.
 ///
 /// That is a genuinely odd result, because the master is stamped first into an
 /// empty grid - so its blocks are *identical* to the standalone latch that does
