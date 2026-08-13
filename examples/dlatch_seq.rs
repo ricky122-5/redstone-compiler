@@ -26,18 +26,22 @@ fn drive(g: &mut Grid, feed: Pos) -> Pos {
 fn main() {
     let mut g = Grid::new();
     let p = stamp_d_latch(&mut g, (0, 0, 0)).unwrap();
-    let d = [drive(&mut g, p.d_a), drive(&mut g, p.d_b)];
-    let e = [drive(&mut g, p.en_a), drive(&mut g, p.en_b)];
+    // One lever per logical input now: the macro fans out internally.
+    let d = [drive(&mut g, p.d)];
+    let e = [drive(&mut g, p.en)];
 
     let mut sim = Sim::new(&g);
     // Store a 1, then try to overwrite it with a 0 while still enabled.
-    let stages: [(&str, bool, bool); 6] = [
+    let stages: [(&str, bool, bool); 8] = [
         ("init d=0 e=0", false, false),
         ("open  d=1 e=1", true, true),
         ("hold  d=1 e=0", true, false),
         ("open  d=0 e=1", false, true), // <- the one that matters
         ("hold  d=0 e=0", false, false),
         ("open  d=1 e=1", true, true),
+        // Q is 1 here. Drop D with the enable low: Q must not move.
+        ("shut  d=0 e=0", false, false),
+        ("shut  d=1 e=0", true, false),
     ];
 
     // Arriving strength on the two links into the latch. Whether a link

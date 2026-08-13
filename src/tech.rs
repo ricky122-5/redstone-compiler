@@ -585,6 +585,10 @@ pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos, Po
 /// instrument that can see inside is the in-game harness - and that needs
 /// coordinates.
 pub struct DLatchPorts {
+    /// Boundary ports on the macro's north face: one pad per logical input,
+    /// fanned out internally. Drive these, not the `_a`/`_b` feeds.
+    pub d: Pos,
+    pub en: Pos,
     pub d_a: Pos,
     pub d_b: Pos,
     pub en_a: Pos,
@@ -659,14 +663,116 @@ pub fn stamp_d_latch(g: &mut Grid, base: Pos) -> Result<DLatchPorts, String> {
     wire(g, &mut router, 4, s_gate.out, set_feed)?;
     wire(g, &mut router, 5, r_gate.out, reset_feed)?;
 
+    // Boundary ports.
+    //
+    // Each input previously came out as the raw feed of an internal gate, two
+    // or four Z stages deep in the body, so anything outside had to thread a
+    // wire through this macro's occupied space to reach it. That is fine for a
+    // lever placed directly on the feed - which is how every in-game test drove
+    // this latch, and why it passes on its own - and not fine for a real driver,
+    // which is why the flip-flop built from two of these fails in game.
+    //
+    // The fan-out moves inside instead. Each logical input gets one pad on the
+    // north face, in clear ground, and the router - which already wires this
+    // macro and is verified in game doing it - carries it to the internal gates
+    // that need it. Callers then land flat on an edge and never enter the body.
+    // Each port is a pad, a repeater, then the point the internal legs fan out
+    // from. The repeater is not optional: the legs are routed with `decay: 0`,
+    // which claims the source is at full strength, and a port driven from
+    // outside is not - the flip-flop delivers 12 to the slave's D pad. Without
+    // the refresh the router under-inserts repeaters on the longer leg and it
+    // dies silently, which is the same failure that once left a spine tap dead.
+    // The route reports success either way; only the logic is wrong.
+    // `extra` adds delay on top of the refresh repeater.
+    //
+    // D is deliberately slower than the enable. Changing D and the enable in the
+    // same instant is a setup violation, but a caller will do it, and with equal
+    // delays the latch sees the new D while the enable is still high and
+    // overwrites the bit it was told to keep. Holding D back by one more
+    // repeater means the enable always closes the latch first, so the cell
+    // tolerates a simultaneous change instead of corrupting on it.
+    let pad = |g: &mut Grid, i: i32, reps: usize| -> Result<(Pos, Pos), String> {
+        let x0 = x + i * 9;
+        let y0 = not_d.feeds[0].1;
+        let entry = (x0, y0, z - 8);
+        let last = if reps == 0 { 1 } else { 2 * reps };
+        for dz in 0..=last as i32 {
+            let p = (x0, y0, z - 8 + dz);
+            g.set((p.0, p.1 - 1, p.2), Block::Solid(Material::Gate))?;
+            let b = if reps > 0 && dz % 2 == 1 {
+                Block::Repeater { facing: Dir::North, delay: 1, powered: false }
+            } else {
+                Block::Dust { power: 0 }
+            };
+            g.set(p, b)?;
+        }
+        Ok((entry, (x0, y0, z - 8 + last as i32)))
+    };
+    // D is refreshed, the enable is not - which also makes the enable strictly
+    // faster than D. That ordering is what lets the cell survive a caller
+    // changing both in the same instant: the enable closes the latch before the
+    // new data arrives, instead of the latch overwriting the bit it was keeping.
+    // The enable can afford to skip the refresh because it is lever-driven both
+    // standalone and inside the flip-flop, whereas D arrives from the master's Q
+    // already down to 12.
+    let (d_port, d_hub) = pad(g, 0, 1)?;
+    let (en_port, en_hub) = pad(g, 1, 0)?;
+    let (clr_port, clr_hub) = pad(g, 2, 0)?;
+
+    // One net per logical input, fanned out to every gate that needs it. Same
+    // net id for both legs so the router treats them as one signal and lets
+    // them share dust rather than fighting over it.
+    // Claim every port target before routing any of them. Otherwise the first
+    // fan-out is free to lay its support block directly on top of a later one's
+    // destination - which it did, and the error looks like a collision rather
+    // than the ordering problem it is.
+    for (net, t) in [
+        (6u32, not_d.feeds[0]),
+        (9, r_gate.feeds[0]),
+        (7, not_e_s.feeds[0]),
+        (10, not_e_r.feeds[0]),
+        (8, clr_feed),
+    ] {
+        router.claim(t, net);
+        router.reserve(t, net);
+        router.reserve((t.0, t.1 + 1, t.2), net);
+    }
+
+    // The pad is deliberately re-claimed for each leg: it is one physical cell
+    // acting as the source of two independent nets, which is exactly what a
+    // fan-out point is.
+    let fan = |g: &mut Grid, r: &mut Router, net: u32, from: Pos, to: Pos| -> Result<(), String> {
+        r.claim(from, net);
+        r.claim(to, net);
+        r.route(g, net, &[from], to, bounds, Material::Gate, 0)
+            .map_err(|e| format!("d-latch port net {net} -> {to:?}: {e}"))
+    };
+    // Each leg is its own net, tapped off a different cell of a short spine.
+    //
+    // Sharing one net id between two legs does not work: the router then treats
+    // their dust as interchangeable and is free to satisfy the second route by
+    // reusing the first one's path, which leaves the second gate connected to
+    // nothing. It looks like a routing success and behaves like an open circuit -
+    // in the flip-flop it left the slave's R gate seeing D=0 while its D port
+    // read 12, so R asserted forever and Q could never rise.
+    // Enable first: its hub is one cell from the pad and therefore the most
+    // easily walled in, and D's routes were doing exactly that.
+    fan(g, &mut router, 7, en_hub, not_e_s.feeds[0])?;
+    fan(g, &mut router, 10, en_hub, not_e_r.feeds[0])?;
+    fan(g, &mut router, 6, d_hub, not_d.feeds[0])?;
+    fan(g, &mut router, 9, d_hub, r_gate.feeds[0])?;
+    fan(g, &mut router, 8, clr_hub, clr_feed)?;
+
     Ok(DLatchPorts {
+        d: d_port,
+        en: en_port,
         d_a: not_d.feeds[0],
         d_b: r_gate.feeds[0],
         en_a: not_e_s.feeds[0],
         en_b: not_e_r.feeds[0],
         q,
         q_not: qn,
-        clr: clr_feed,
+        clr: clr_port,
         set_feed,
         reset_feed,
         not_e_r: not_e_r.out,
@@ -812,49 +918,35 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
     const GAP: i32 = 14;
 
     let m = stamp_d_latch(g, (x, y, z))?;
-    let (m_da, m_db, m_ea, m_eb, m_q, m_clr) = (m.d_a, m.d_b, m.en_a, m.en_b, m.q, m.clr);
+    let (m_d, m_en, m_q, m_clr) = (m.d, m.en, m.q, m.clr);
     let sl = stamp_d_latch(g, (x, y, end_z(g) + GAP))?;
-    let (s_da, s_db, s_ea, s_eb, s_q, s_clr) = (sl.d_a, sl.d_b, sl.en_a, sl.en_b, sl.q, sl.clr);
-
-    // Master Q and the inverted clock each drive two slave inputs, so both need
-    // somewhere to branch from. The latch's Q has its own feedback wiring behind
-    // it in Z, so that spine runs sideways.
-    let mq = stamp_out_spine_dir(g, m_q, 4, (1, 0), Material::Gate)?;
+    let (s_d, s_en, s_q, s_clr) = (sl.d, sl.en, sl.q, sl.clr);
 
     let mut router = Router::from_grid(g);
     let bounds = ((x - 60, y - 40, z - 60), (x + 200, y + 60, end_z(g) + 60));
-    // `decay` is how much signal the branch point has already lost. A spine is
-    // plain dust, so tapping its fourth cell means starting at strength 12, not
-    // 15. Telling the router 0 makes it under-insert repeaters and the wire dies
-    // partway - which is exactly what happened: the taps at index 0 worked and
-    // the taps at index 3 were silently dead, leaving the slave's !E inverter
-    // stuck high and the reset path with it.
-    let wire = |g: &mut Grid,
-                r: &mut Router,
-                net: u32,
-                from: Pos,
-                to: Pos,
-                decay: i32|
-     -> Result<(), String> {
-        r.claim(from, net);
-        r.claim(to, net);
-        r.route(g, net, &[from], to, bounds, Material::Gate, decay)
-            .map_err(|e| format!("dff wire {net}: {e}"))
-    };
 
-    wire(g, &mut router, 11, mq[0], s_da, 0)?;
-    // Index 1 is the spine's refresh repeater, so index 4 is two dust cells
-    // past a full-strength source: decay 2, not 3.
-    wire(g, &mut router, 12, mq[4], s_db, 2)?;
+    // One link, not two.
+    //
+    // Both latches now expose boundary ports and fan out internally, so the
+    // master's Q has a single destination on the slave's north face instead of
+    // two feeds buried two and four stages inside its body. That halves this
+    // connection and, more importantly, means it lands on an edge in clear
+    // ground rather than threading through occupied space - which is what the
+    // in-game evidence pinned the flip-flop's failure on.
+    router.claim(m_q, 11);
+    router.claim(s_d, 11);
+    router
+        .route(g, 11, &[m_q], s_d, bounds, Material::Gate, 0)
+        .map_err(|e| format!("dff master->slave: {e}"))?;
 
     Ok(DffPorts {
-        d_feeds: vec![m_da, m_db],
-        clk_feeds: vec![m_ea, m_eb],
-        clk_n_feeds: vec![s_ea, s_eb],
+        d_feeds: vec![m_d],
+        clk_feeds: vec![m_en],
+        clk_n_feeds: vec![s_en],
         clr_feeds: vec![m_clr, s_clr],
         q: s_q,
         master_q: m_q,
-        slave_d_feeds: vec![s_da, s_db],
+        slave_d_feeds: vec![s_d],
         slave_not_e_r: sl.not_e_r,
         slave_r_out: sl.r_out,
         master_not_e_r: m.not_e_r,
@@ -1083,18 +1175,17 @@ mod tests {
     fn d_latch_follows_then_holds() {
         let mut g = Grid::new();
         let p = stamp_d_latch(&mut g, (0, 0, 0)).unwrap();
-        let (da, db, ea, eb, q) = (p.d_a, p.d_b, p.en_a, p.en_b, p.q);
-        let d1 = drive(&mut g, da);
-        let d2 = drive(&mut g, db);
-        let e1 = drive(&mut g, ea);
-        let e2 = drive(&mut g, eb);
+        // Drive the boundary ports, which is what a caller has. Driving the
+        // internal feeds directly - as this test used to - bypasses the macro's
+        // own fan-out and tests a circuit no caller can build.
+        let q = p.q;
+        let d1 = drive(&mut g, p.d);
+        let e1 = drive(&mut g, p.en);
         let mut sim = Sim::new(&g);
 
         let set = |sim: &mut Sim, d: bool, e: bool| {
             sim.set_lever(d1, d);
-            sim.set_lever(d2, d);
             sim.set_lever(e1, e);
-            sim.set_lever(e2, e);
             let (t, ok) = sim.run_until_stable(5000);
             assert!(ok, "did not settle after {t} ticks (d={d} e={e})");
         };

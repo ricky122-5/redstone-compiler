@@ -65,8 +65,8 @@ fn main() {
     sim.run_until_stable(20000);
 
     println!(
-        "{:<16} {:>4} {:>4} {:>4} {:>8} {:>6} {:>6} {:>6}",
-        "stage", "D", "CLK", "Q", "master_q", "sD_a", "sD_b", "burnt"
+        "{:<16} {:>4} {:>4} {:>4} {:>8} {:>7} {:>7} {:>6} {:>6}",
+        "stage", "D", "CLK", "Q", "master_q", "slaveD", "sNOTER", "sROUT", "burnt"
     );
     for (name, d, clk) in stages {
         for &l in &dl {
@@ -84,14 +84,15 @@ fn main() {
         // shows up here it is the fault, not a symptom.
         let burnt = sim.burned_out().len();
         println!(
-            "{:<16} {:>4} {:>4} {:>4} {:>8} {:>6} {:>6} {:>6} {}",
+            "{:<16} {:>4} {:>4} {:>4} {:>8} {:>7} {:>7} {:>6} {:>6} {}",
             name,
             d as u8,
             clk as u8,
             f.dust_at(p.q),
             f.dust_at(p.master_q),
             f.dust_at(p.slave_d_feeds[0]),
-            f.dust_at(p.slave_d_feeds[1]),
+            f.dust_at(p.slave_not_e_r),
+            f.dust_at(p.slave_r_out),
             burnt,
             if stable { "" } else { "UNSTABLE" }
         );
