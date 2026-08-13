@@ -560,10 +560,44 @@ pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos, Po
 ///   which overwrites silently, but `examples/export_audit.rs` shows the only
 ///   overwrites are Gate-to-Wire swaps between two solid blocks.
 ///
-/// So whatever is left is caused by something placed *after* the master: the
-/// slave macro, or the outer route between them. Since the master's own blocks
-/// cannot have changed, the next thing to check is what those later placements
-/// put near the master - not the master itself.
+/// It is not composition either. `examples/master_diff.rs` diffs the grid and
+/// finds **zero** blocks of the master changed by the rest of the flip-flop,
+/// and the only added wire touching the master's dust is its own Q output
+/// leaving on a diagonal, which is intended.
+///
+/// # The bug reproduces in this latch alone
+///
+/// Comparing the two harnesses showed the gap: every in-game latch stage until
+/// now changed D *while the enable was already high*. The flip-flop's master
+/// meets a different case - D changes while the latch is **shut**, and then the
+/// enable rises. Adding that case to `tools/dlatch-run.sh` reproduces the fault
+/// in a circuit a third the size:
+///
+/// ```text
+/// en1_d1     Q ON     NOTER off
+/// en1_d0     Q off    NOTER off
+/// en0_d1     Q off    NOTER ON
+/// reopen_d1  Q off    NOTER ON    <- enable raised, inverter does not follow
+/// ```
+///
+/// `NOTER` is the enable inverter. It tracks the enable through a rise and a
+/// fall and then will not rise again, so the latch never re-opens - which is
+/// exactly why the master never takes a 0.
+///
+/// Two fixes tried against it, both measured, neither sufficient:
+///
+/// * The enable had no refresh repeater, deliberately, to keep it faster than
+///   D. Giving every port a refresh and getting the ordering from repeater
+///   *count* instead lifts the enable legs from 11 to 12 in simulation and
+///   changes nothing in game. (Kept anyway: an unrefreshed port is wrong on its
+///   own merits.)
+/// * Repeater locking would explain a component that follows its input and then
+///   freezes, and `examples/export_audit.rs` now checks the *exported* grid,
+///   levers and lamps included, rather than the bare macro. Zero locked
+///   repeaters either way.
+///
+/// So the open question is narrow and well posed: why does a NOR cell whose
+/// input is a lever-driven routed wire follow two transitions and then stop?
 ///
 /// # Superseded: ports were in the wrong place
 ///
@@ -789,16 +823,19 @@ pub fn stamp_d_latch(g: &mut Grid, base: Pos) -> Result<DLatchPorts, String> {
         }
         Ok((entry, (x0, y0, z - 8 + last as i32)))
     };
-    // D is refreshed, the enable is not - which also makes the enable strictly
-    // faster than D. That ordering is what lets the cell survive a caller
-    // changing both in the same instant: the enable closes the latch before the
-    // new data arrives, instead of the latch overwriting the bit it was keeping.
-    // The enable can afford to skip the refresh because it is lever-driven both
-    // standalone and inside the flip-flop, whereas D arrives from the master's Q
-    // already down to 12.
-    let (d_port, d_hub) = pad(g, 0, 1)?;
-    let (en_port, en_hub) = pad(g, 1, 0)?;
-    let (clr_port, clr_hub) = pad(g, 2, 0)?;
+    // Every port is refreshed, and D carries one more repeater than the enable.
+    //
+    // The ordering matters: a caller may change D and the enable in the same
+    // instant, and the enable has to close the latch before the new data
+    // arrives, or the latch overwrites the bit it was told to keep. Making the
+    // enable *unrefreshed* was one way to get that ordering, and it was wrong -
+    // driven in game the enable then carried its first rise and its fall and
+    // would not rise a second time, which is exactly why the flip-flop's master
+    // never re-opened and so could never take a 0. Refresh everything; get the
+    // ordering from the repeater count instead.
+    let (d_port, d_hub) = pad(g, 0, 2)?;
+    let (en_port, en_hub) = pad(g, 1, 1)?;
+    let (clr_port, clr_hub) = pad(g, 2, 1)?;
 
     // One net per logical input, fanned out to every gate that needs it. Same
     // net id for both legs so the router treats them as one signal and lets

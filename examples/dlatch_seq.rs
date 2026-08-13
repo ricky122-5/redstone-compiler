@@ -32,7 +32,7 @@ fn main() {
 
     let mut sim = Sim::new(&g);
     // Store a 1, then try to overwrite it with a 0 while still enabled.
-    let stages: [(&str, bool, bool); 8] = [
+    let stages: [(&str, bool, bool); 11] = [
         ("init d=0 e=0", false, false),
         ("open  d=1 e=1", true, true),
         ("hold  d=1 e=0", true, false),
@@ -42,6 +42,13 @@ fn main() {
         // Q is 1 here. Drop D with the enable low: Q must not move.
         ("shut  d=0 e=0", false, false),
         ("shut  d=1 e=0", true, false),
+        // The case neither harness covered, and the one the flip-flop's master
+        // fails: D changed while the latch was shut, now open it. Q must take
+        // the new value. Every earlier stage changes D with the enable already
+        // high, which is a different path through the gates.
+        ("reopen d=1 e=1", true, true),
+        ("shut  d=0 e=0", false, false),
+        ("reopen d=0 e=1", false, true),
     ];
 
     // Arriving strength on the two links into the latch. Whether a link
