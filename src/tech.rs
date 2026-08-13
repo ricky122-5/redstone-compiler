@@ -596,8 +596,28 @@ pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos, Po
 ///   levers and lamps included, rather than the bare macro. Zero locked
 ///   repeaters either way.
 ///
-/// So the open question is narrow and well posed: why does a NOR cell whose
-/// input is a lever-driven routed wire follow two transitions and then stop?
+/// # Bisection against the game
+///
+/// That question now has an answer, and it is *not* the wire or the gate.
+/// Four circuits driven through three full on/off cycles in one world each:
+///
+/// | circuit | result |
+/// |---|---|
+/// | lever, dust, repeater, dust, lamp | tracks every cycle |
+/// | NOR cell fed by a lever on its pad | tracks every cycle |
+/// | NOR cell fed by a **routed** wire | tracks every cycle |
+/// | one pad fanning out to **two** NOR cells over routed legs | both track every cycle |
+/// | this latch | freezes after two transitions |
+///
+/// The last row is the enable port's exact structure plus the latch around it,
+/// and the row above it is that structure alone, working. So the fault needs the
+/// latch - its density, or its feedback loop - and is not inherent to routed
+/// wires, to fan-out, or to a NOR cell responding repeatedly.
+///
+/// Every hypothesis that does not need the latch is now dead: decay, locking,
+/// orientation, unsupported dust, net merging, probe lamps, lever clobbering,
+/// composition with the slave, Q loading, and the pads themselves (stripping
+/// their repeaters changes nothing in game).
 ///
 /// # Superseded: ports were in the wrong place
 ///
@@ -833,6 +853,14 @@ pub fn stamp_d_latch(g: &mut Grid, base: Pos) -> Result<DLatchPorts, String> {
     // would not rise a second time, which is exactly why the flip-flop's master
     // never re-opened and so could never take a 0. Refresh everything; get the
     // ordering from the repeater count instead.
+    // Refreshed pads, D one repeater slower than the enable.
+    //
+    // Stripping the repeaters was tried in game, on the theory that a
+    // hand-placed repeater between the lever and the fan-out was the structural
+    // delta that came with the freeze. It changed nothing there and cost the
+    // ordering guarantee here - `d_latch_follows_then_holds` fails, because a
+    // caller changing D and the enable together then overwrites the stored bit.
+    // So the pads keep their refresh.
     let (d_port, d_hub) = pad(g, 0, 2)?;
     let (en_port, en_hub) = pad(g, 1, 1)?;
     let (clr_port, clr_hub) = pad(g, 2, 1)?;

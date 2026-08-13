@@ -53,7 +53,15 @@ fn main() {
     // internal gate feeds it fans out to. The inverter stops following the
     // enable after one rise, and this says whether the signal dies at the pad
     // or somewhere along the leg.
-    let probes = [
+    // With OHMC_MIN_PROBES set, publish only Q.
+    //
+    // A probe replaces the block *under* a node's output dust with a lamp,
+    // which is a circuit modification, not a passive read. Simulating with them
+    // says they are harmless, but our lamp model is exactly the sort of thing
+    // that could be wrong here - and the gate that freezes in game, NOTER, is
+    // one of the probed nodes. The only way to know is to take them away.
+    let min_probes = std::env::var("OHMC_MIN_PROBES").is_ok();
+    let all_probes = [
         ("Q", p.q),
         ("NOTER", p.not_e_r),
         ("ROUT", p.r_out),
@@ -62,7 +70,12 @@ fn main() {
         ("ENB", p.en_b),
         ("DPAD", p.d),
     ];
-    for (_, q) in probes { g.force((q.0, q.1 - 1, q.2), Block::Lamp { lit: false }); }
+    let probes: Vec<(&str, Pos)> = if min_probes {
+        vec![("Q", p.q)]
+    } else {
+        all_probes.to_vec()
+    };
+    for (_, q) in probes.iter().copied() { g.force((q.0, q.1 - 1, q.2), Block::Lamp { lit: false }); }
 
     let lo = g.bounds().unwrap().0;
     let rel = |q: Pos| (q.0 - lo.0, q.1 - lo.1 + 1, q.2 - lo.2);
@@ -72,7 +85,7 @@ fn main() {
     // like a dead circuit.
     for f in [p.d] { let r = rel((f.0, f.1, f.2 - 2)); man.push_str(&format!("D {} {} {}\n", r.0, r.1, r.2)); }
     for f in [p.en] { let r = rel((f.0, f.1, f.2 - 2)); man.push_str(&format!("CLK {} {} {}\n", r.0, r.1, r.2)); }
-    for (n, q) in probes { let r = rel((q.0, q.1 - 1, q.2)); man.push_str(&format!("{n} {} {} {}\n", r.0, r.1, r.2)); }
+    for (n, q) in probes.iter().copied() { let r = rel((q.0, q.1 - 1, q.2)); man.push_str(&format!("{n} {} {} {}\n", r.0, r.1, r.2)); }
     std::fs::write(format!("{out}.manifest"), &man).unwrap();
     std::fs::write(&out, to_mcfunction(&g, (0, 1, 0))).unwrap();
     eprintln!("{man}blocks={}", g.len());

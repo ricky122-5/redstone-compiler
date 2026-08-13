@@ -3,7 +3,7 @@ set -u
 cd /tmp/ohm-mc
 JAVA="$HOME/Library/Application Support/minecraft/runtime/java-runtime-delta/mac-os-arm64/java-runtime-delta/jre.bundle/Contents/Home/bin/java"
 [ -x "$JAVA" ] || JAVA=java
-MAN=/tmp/reporient.mcfunction.manifest
+MAN=/tmp/routednor.mcfunction.manifest
 LS=$(awk '$1=="LEV"{print $2, $3, $4}' "$MAN")
 rm -rf world
 PK=world/datapacks/ohm
@@ -11,7 +11,7 @@ mkdir -p "$PK/data/ohm/function"
 cat > "$PK/pack.mcmeta" <<'EOF'
 {"pack":{"description":"rep","pack_format":61,"supported_formats":{"min_inclusive":4,"max_inclusive":99}}}
 EOF
-cp /tmp/reporient.mcfunction "$PK/data/ohm/function/circuit.mcfunction"
+cp /tmp/routednor.mcfunction "$PK/data/ohm/function/circuit.mcfunction"
 awk '$1!="LEV"{
   printf "execute if block %s %s %s minecraft:redstone_lamp[lit=true] run say OHMC_%s ON\n", $2,$3,$4,$1
   printf "execute if block %s %s %s minecraft:redstone_lamp[lit=false] run say OHMC_%s off\n", $2,$3,$4,$1
