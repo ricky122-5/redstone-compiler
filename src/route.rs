@@ -126,6 +126,16 @@ impl Router {
                 // it. `claim` overrides this for cell outputs and feed stubs,
                 // which routes are supposed to attach to.
                 r.owner.insert(p, PREPLACED);
+                // Dust needs a full block under it. Block that cell even when it
+                // is currently empty, or a route is free to run through it and
+                // leave a repeater there - and dust resting on a repeater has no
+                // support, so in game it pops off the moment it is placed while
+                // this project's simulator happily models it as wire.
+                //
+                // That is not hypothetical: it is what killed the D latch's
+                // fan-out leg to `r_gate`, which was correct in simulation and
+                // dead in Minecraft.
+                r.blocked.insert(crate::world::down(p));
             }
         }
         r
@@ -411,6 +421,19 @@ impl Router {
             // route's substrate) rather than trying to replace it.
             if grid.is_free(down(p)) {
                 grid.set(down(p), Block::Solid(material))?;
+            } else if !grid.get(down(p)).is_opaque() {
+                // Dust needs a full block under it. The search rejects cells
+                // whose support is neither free nor opaque, but the *target* is
+                // exempt from that check, so a target whose support cell was
+                // taken by an earlier route - by a repeater, typically - used to
+                // get dust laid on nothing. In game that dust pops off the
+                // instant it is placed and the wire silently does not exist,
+                // while this project's simulator models it as ordinary wire and
+                // reports the circuit working. Fail loudly instead.
+                return Err(format!(
+                    "no support for dust at {p:?}: {:?} sits below it",
+                    grid.get(down(p))
+                ));
             }
             if sites.contains(&i) {
                 let dir = if p.0 > prev.0 {

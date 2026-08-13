@@ -108,6 +108,28 @@ fn diagonal_links(g: &Grid) -> Vec<(Pos, Pos)> {
     out
 }
 
+/// Dust with nothing solid beneath it.
+///
+/// Redstone dust needs a full block under it. Placed on a repeater, a torch, or
+/// air it pops off the instant it is placed, so the wire simply does not exist
+/// in game - while this project's simulator models it as ordinary dust and
+/// reports the circuit working. Found by tracing the D latch's dead fan-out leg,
+/// whose target feed sits directly on top of a repeater.
+fn unsupported_dust(g: &Grid) -> Vec<(Pos, Block)> {
+    let mut out = Vec::new();
+    for (&p, &b) in g.iter() {
+        if !matches!(b, Block::Dust { .. }) {
+            continue;
+        }
+        let under = g.get(down(p));
+        if !under.conducts() {
+            out.push((p, under));
+        }
+    }
+    out.sort_by_key(|&(p, _)| p);
+    out
+}
+
 fn main() {
     let cases: Vec<(&str, Box<dyn Fn(&mut Grid)>)> = vec![
         ("rs_latch", Box::new(|g: &mut Grid| {
@@ -130,12 +152,17 @@ fn main() {
         total += l.len();
         let sh = shorted_supports(&g);
         let diag = diagonal_links(&g);
+        let unsup = unsupported_dust(&g);
         println!(
             "{name:<10} {reps:>4} repeaters, {} locked, {} shorted torch supports",
             l.len(),
             sh.len()
         );
         println!("           {} diagonal dust links across a Y step", diag.len());
+        println!("           {} DUST WITH NO SOLID SUPPORT", unsup.len());
+        for (p, under) in unsup.iter().take(8) {
+            println!("    {p:?} sits on {under:?}");
+        }
         for (a, b) in diag.iter().take(6) {
             println!("    {a:?} <-> {b:?}");
         }

@@ -681,6 +681,28 @@ pub fn stamp_d_latch(g: &mut Grid, base: Pos) -> Result<DLatchPorts, String> {
             .map_err(|e| format!("d-latch wire {net}: {e}"))
     };
 
+    // Reserve every port target, the cell above it, *and the cell under it*,
+    // before any routing at all - including the five internal wires below.
+    //
+    // A target's support is as much a part of the target as the target is. The
+    // search exempts a target from its own support check, so an earlier route
+    // that parks a repeater underneath one leaves dust resting on nothing. That
+    // dust is gone the moment Minecraft places it, while this simulator models
+    // it as ordinary wire - which is exactly what killed the leg to r_gate, and
+    // why the latch was correct here and dead in game.
+    for (net, t) in [
+        (6u32, not_d.feeds[0]),
+        (9, r_gate.feeds[0]),
+        (7, not_e_s.feeds[0]),
+        (10, not_e_r.feeds[0]),
+        (8, clr_feed),
+    ] {
+        router.claim(t, net);
+        router.reserve(t, net);
+        router.reserve((t.0, t.1 + 1, t.2), net);
+        router.reserve((t.0, t.1 - 1, t.2), net);
+    }
+
     wire(g, &mut router, 1, not_d.out, s_gate.feeds[0])?;
     wire(g, &mut router, 2, not_e_s.out, s_gate.feeds[1])?;
     wire(g, &mut router, 3, not_e_r.out, r_gate.feeds[1])?;
@@ -746,21 +768,6 @@ pub fn stamp_d_latch(g: &mut Grid, base: Pos) -> Result<DLatchPorts, String> {
     // One net per logical input, fanned out to every gate that needs it. Same
     // net id for both legs so the router treats them as one signal and lets
     // them share dust rather than fighting over it.
-    // Claim every port target before routing any of them. Otherwise the first
-    // fan-out is free to lay its support block directly on top of a later one's
-    // destination - which it did, and the error looks like a collision rather
-    // than the ordering problem it is.
-    for (net, t) in [
-        (6u32, not_d.feeds[0]),
-        (9, r_gate.feeds[0]),
-        (7, not_e_s.feeds[0]),
-        (10, not_e_r.feeds[0]),
-        (8, clr_feed),
-    ] {
-        router.claim(t, net);
-        router.reserve(t, net);
-        router.reserve((t.0, t.1 + 1, t.2), net);
-    }
 
     // The pad is deliberately re-claimed for each leg: it is one physical cell
     // acting as the source of two independent nets, which is exactly what a
