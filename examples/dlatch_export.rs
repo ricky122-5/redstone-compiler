@@ -23,8 +23,11 @@ fn main() {
     let out = std::env::args().nth(1).unwrap_or_else(|| "/tmp/dlatch.mcfunction".into());
     let mut g = Grid::new();
     let p = stamp_d_latch(&mut g, (0, 0, 0)).unwrap();
-    for f in [p.d_a, p.d_b] { lever(&mut g, f); }
-    for f in [p.en_a, p.en_b] { lever(&mut g, f); }
+    // Boundary ports, which is what a caller drives. The old export drove the
+    // internal feeds directly, so the in-game pass it produced said nothing
+    // about whether the ports themselves work.
+    for f in [p.d] { lever(&mut g, f); }
+    for f in [p.en] { lever(&mut g, f); }
     let probes = [("Q", p.q), ("NOTER", p.not_e_r), ("ROUT", p.r_out)];
     for (_, q) in probes { g.force((q.0, q.1 - 1, q.2), Block::Lamp { lit: false }); }
 
@@ -34,8 +37,8 @@ fn main() {
     // `lever` puts the switch two blocks north of the feed, at the *same* Y.
     // Getting that offset wrong silently drives nothing, which reads exactly
     // like a dead circuit.
-    for f in [p.d_a, p.d_b] { let r = rel((f.0, f.1, f.2 - 2)); man.push_str(&format!("D {} {} {}\n", r.0, r.1, r.2)); }
-    for f in [p.en_a, p.en_b] { let r = rel((f.0, f.1, f.2 - 2)); man.push_str(&format!("CLK {} {} {}\n", r.0, r.1, r.2)); }
+    for f in [p.d] { let r = rel((f.0, f.1, f.2 - 2)); man.push_str(&format!("D {} {} {}\n", r.0, r.1, r.2)); }
+    for f in [p.en] { let r = rel((f.0, f.1, f.2 - 2)); man.push_str(&format!("CLK {} {} {}\n", r.0, r.1, r.2)); }
     for (n, q) in probes { let r = rel((q.0, q.1 - 1, q.2)); man.push_str(&format!("{n} {} {} {}\n", r.0, r.1, r.2)); }
     std::fs::write(format!("{out}.manifest"), &man).unwrap();
     std::fs::write(&out, to_mcfunction(&g, (0, 1, 0))).unwrap();

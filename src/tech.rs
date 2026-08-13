@@ -744,7 +744,16 @@ pub fn stamp_d_latch(g: &mut Grid, base: Pos) -> Result<DLatchPorts, String> {
     let fan = |g: &mut Grid, r: &mut Router, net: u32, from: Pos, to: Pos| -> Result<(), String> {
         r.claim(from, net);
         r.claim(to, net);
-        r.route(g, net, &[from], to, bounds, Material::Gate, 0)
+        // Claim a head start on the decay budget that has not actually been
+        // spent. MAX_RUN is 13, which leaves a wire arriving with 2 of 15 to
+        // spare - enough for the simulator and not enough for the game, which
+        // is how a leg measured at 5 here turned out to be dead there.
+        // Overstating the decay makes the router insert repeaters earlier and
+        // the leg land around 10 instead. Done here rather than by lowering
+        // MAX_RUN globally, because the placer's gate arrays are packed tightly
+        // enough that refreshing more often makes routes unsatisfiable.
+        const PESSIMISM: i32 = 4;
+        r.route(g, net, &[from], to, bounds, Material::Gate, PESSIMISM)
             .map_err(|e| format!("d-latch port net {net} -> {to:?}: {e}"))
     };
     // Each leg is its own net, tapped off a different cell of a short spine.

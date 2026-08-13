@@ -51,7 +51,7 @@ fn main() {
     let (sf, rf) = (p.set_feed, p.reset_feed);
     println!(
         "{:<15} {:>3} {:>3} {:>4} {:>4} {:>7} {:>6} {:>6} {:>6}",
-        "stage", "D", "E", "Q", "Qn", "not_e_r", "r_out", "S_arr", "R_arr"
+        "stage", "D", "E", "Q", "Qn", "notD_in", "rGate_D", "enS_in", "enR_in"
     );
     for (name, dv, ev) in stages {
         for &l in &d {
@@ -69,10 +69,10 @@ fn main() {
             ev as u8,
             f.dust_at(p.q),
             f.dust_at(p.q_not),
-            f.dust_at(p.not_e_r),
-            f.dust_at(p.r_out),
-            f.dust_at(sf),
-            f.dust_at(rf),
+            f.dust_at(p.d_a),
+            f.dust_at(p.d_b),
+            f.dust_at(p.en_a),
+            f.dust_at(p.en_b),
             if stable { "" } else { "UNSTABLE " },
             if sim.burned_out().is_empty() { "" } else { "BURNT" }
         );
