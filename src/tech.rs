@@ -530,7 +530,25 @@ pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos, Po
     Ok((a.feeds[1], b.feeds[1], b.feeds[2], b.out, a.out))
 }
 
-/// # Status: boundary ports work in simulation, not in game
+/// # Status: boundary ports verified in real Minecraft
+///
+/// The latch drives correctly through its boundary ports in game - Q follows D
+/// high, follows it low, and holds when the enable drops. So the port rework
+/// achieves both things at once: the cell is game-correct *and* composable,
+/// where the old design was game-correct and could not be composed.
+///
+/// Getting there needed the unsupported-dust fix. The leg to `r_gate` was not
+/// weak or shorted; its target dust was resting on a repeater, which in
+/// Minecraft is not a placement at all.
+///
+/// The flip-flop built from two of these is still wrong in game: the master
+/// captures a 1 and resets on the asynchronous clear, but will not take a 0 from
+/// D, and Q never rises. Both latches are now individually verified in game and
+/// carry no unsupported dust, so what is left is again specific to composition -
+/// and the probe lamps are ruled out, since simulating with them inserted
+/// (`dff_seq --probes`) changes nothing.
+///
+/// # Superseded: ports were in the wrong place
 ///
 /// **This is a regression against the previous design in one respect, and it is
 /// deliberate but unresolved.** The old latch exposed raw internal feeds; driven
