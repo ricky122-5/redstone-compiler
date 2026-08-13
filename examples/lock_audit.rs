@@ -121,8 +121,9 @@ fn unsupported_dust(g: &Grid) -> Vec<(Pos, Block)> {
         if !matches!(b, Block::Dust { .. }) {
             continue;
         }
+        // Support means opaque, not conducting: dust sits on a lamp fine.
         let under = g.get(down(p));
-        if !under.conducts() {
+        if !under.is_opaque() {
             out.push((p, under));
         }
     }

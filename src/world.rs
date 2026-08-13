@@ -136,8 +136,13 @@ impl Block {
     }
 
     /// Whether this block can be powered and then re-emit that power to dust.
-    /// Same set as `is_opaque` in our restricted cell library, but named
-    /// separately because the concepts diverge for e.g. slabs and glass.
+    ///
+    /// **Not** the same set as [`Block::is_opaque`], despite what this comment
+    /// used to claim. A redstone lamp is a full opaque block - dust rests on one
+    /// happily - but it does not pass a signal onward. Use `is_opaque` to ask
+    /// whether something can *support* dust and `conducts` to ask whether it can
+    /// *carry* power; conflating them makes a support audit report every output
+    /// lamp as a fault.
     pub fn conducts(self) -> bool {
         matches!(self, Block::Solid(_))
     }
