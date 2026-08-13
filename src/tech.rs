@@ -543,10 +543,27 @@ pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos, Po
 ///
 /// The flip-flop built from two of these is still wrong in game: the master
 /// captures a 1 and resets on the asynchronous clear, but will not take a 0 from
-/// D, and Q never rises. Both latches are now individually verified in game and
-/// carry no unsupported dust, so what is left is again specific to composition -
-/// and the probe lamps are ruled out, since simulating with them inserted
-/// (`dff_seq --probes`) changes nothing.
+/// D, and Q never rises.
+///
+/// That is a genuinely odd result, because the master is stamped first into an
+/// empty grid - so its blocks are *identical* to the standalone latch that does
+/// reset in game - and it is driven by levers on the same ports. Three things
+/// that could have made the difference are ruled out, each by measurement rather
+/// than argument:
+///
+/// * **Loading Q.** A standalone latch with a long routed wire hung off Q
+///   (`OHMC_LOAD_Q=1 cargo run --example dlatch_export`) sets, resets and holds
+///   correctly in game. So driving the slave is not what breaks the master.
+/// * **The probe lamps.** Simulating with them inserted (`dff_seq --probes`)
+///   changes nothing.
+/// * **Lever attachment clobbering the circuit.** The exporters use `force`,
+///   which overwrites silently, but `examples/export_audit.rs` shows the only
+///   overwrites are Gate-to-Wire swaps between two solid blocks.
+///
+/// So whatever is left is caused by something placed *after* the master: the
+/// slave macro, or the outer route between them. Since the master's own blocks
+/// cannot have changed, the next thing to check is what those later placements
+/// put near the master - not the master itself.
 ///
 /// # Superseded: ports were in the wrong place
 ///

@@ -23,6 +23,27 @@ fn main() {
     let out = std::env::args().nth(1).unwrap_or_else(|| "/tmp/dlatch.mcfunction".into());
     let mut g = Grid::new();
     let p = stamp_d_latch(&mut g, (0, 0, 0)).unwrap();
+    // With OHMC_LOAD_Q set, hang a long routed wire off Q, the way the
+    // flip-flop's master drives its slave.
+    //
+    // This is the one difference between the master - which will not reset in
+    // game - and this same macro standalone, which does. The latch is otherwise
+    // identical and driven identically, so if loading Q breaks the reset, that
+    // is the whole of the flip-flop bug in a circuit a third the size.
+    if std::env::var("OHMC_LOAD_Q").is_ok() {
+        use ohmc::route::Router;
+        use ohmc::world::Material;
+        let sink = (p.q.0 + 30, p.q.1, p.q.2 + 40);
+        g.set((sink.0, sink.1 - 1, sink.2), Block::Solid(Material::Gate)).unwrap();
+        g.set(sink, Block::Dust { power: 0 }).unwrap();
+        let mut r = Router::from_grid(&g);
+        r.claim(p.q, 90);
+        r.claim(sink, 90);
+        let bounds = ((-60, -40, -60), (200, 60, 200));
+        r.route(&mut g, 90, &[p.q], sink, bounds, Material::Gate, 0)
+            .expect("load wire");
+        eprintln!("[Q loaded with a routed wire to {sink:?}]");
+    }
     // Boundary ports, which is what a caller drives. The old export drove the
     // internal feeds directly, so the in-game pass it produced said nothing
     // about whether the ports themselves work.
