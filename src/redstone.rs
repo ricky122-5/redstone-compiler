@@ -57,6 +57,21 @@
 //! We deliberately do **not** model sub-tick update ordering or
 //! quasi-connectivity.
 //!
+//! # Repeater orientation is verified against the game
+//!
+//! A repeater's output is `opposite(facing)`: `facing=North` drives the +Z end.
+//! Measured, not assumed - `examples/rep_orient.rs` builds two
+//! lever-dust-repeater-dust-lamp chains, one per orientation, and
+//! `tools/rep-orient-run.sh` drives them through three on/off cycles in game.
+//! The North chain tracks the lever every time; the South chain never lights.
+//!
+//! Worth measuring because a reversed repeater would have survived nearly every
+//! in-game test this project has: `mc-validate.sh` builds a **fresh world per
+//! input combination**, so almost every hardware pass we own is a *first*
+//! transition after placement. That test also settles the more useful question -
+//! repeaters do relay repeated transitions correctly - so a wire that carries
+//! one change and then stops is not a repeater going stale.
+//!
 //! # Repeater locking is not modelled - but it is not the current fault
 //!
 //! A repeater whose *side* is driven by another powered repeater is **locked**:

@@ -49,7 +49,19 @@ fn main() {
     // about whether the ports themselves work.
     for f in [p.d] { lever(&mut g, f); }
     for f in [p.en] { lever(&mut g, f); }
-    let probes = [("Q", p.q), ("NOTER", p.not_e_r), ("ROUT", p.r_out)];
+    // Probe the enable path end to end: the pad the lever drives, and the two
+    // internal gate feeds it fans out to. The inverter stops following the
+    // enable after one rise, and this says whether the signal dies at the pad
+    // or somewhere along the leg.
+    let probes = [
+        ("Q", p.q),
+        ("NOTER", p.not_e_r),
+        ("ROUT", p.r_out),
+        ("ENPAD", p.en),
+        ("ENA", p.en_a),
+        ("ENB", p.en_b),
+        ("DPAD", p.d),
+    ];
     for (_, q) in probes { g.force((q.0, q.1 - 1, q.2), Block::Lamp { lit: false }); }
 
     let lo = g.bounds().unwrap().0;

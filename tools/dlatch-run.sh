@@ -79,6 +79,18 @@ stage shut_d0                     # Q must still hold the 1
 setlev true 10 "$CS"              # reopen with D=0
 stage reopen_d0                   # Q must take the 0
 
+# The enable inverter is stuck by now. Does it ever come back? A gate that
+# recovers after another toggle is a missed block update; one that stays put is
+# structural. Also waits far longer than the settle time, to rule out the
+# reading simply being early.
+setlev false 12 "$CS"
+stage wiggle_off
+setlev true 12 "$CS"
+stage wiggle_on
+send "say OHMC_STAGE long_wait" 1
+sleep 30
+send "function ohm:probe" 2
+
 send "stop" 2
 wait $SRV 2>/dev/null
 echo "=== flip-flop in real Minecraft ==="
