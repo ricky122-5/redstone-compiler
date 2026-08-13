@@ -47,6 +47,13 @@
 //! toggled, so a burnt torch could never recover and stayed pinned off forever -
 //! which reported five dead torches in the flip-flop that the game does not have.
 //!
+//! Dust connects across a Y step only when the step is actually open: climbing
+//! requires nothing opaque above the lower dust, and descending requires nothing
+//! opaque above the lower dust either. Both checks were missing, which made this
+//! model strictly **more connected** than Minecraft - it found wire paths the
+//! game does not have. That is the exact signature of every "correct here, dead
+//! in game" result this project has hit.
+//!
 //! We deliberately do **not** model sub-tick update ordering or
 //! quasi-connectivity.
 //!
@@ -425,14 +432,24 @@ impl<'g> Sim<'g> {
             match shape_conn(&shape, d) {
                 Conn::None => {}
                 Conn::Up => {
-                    if matches!(self.grid.get(up(n)), Block::Dust { .. }) {
+                    // Dust only climbs a step when nothing opaque caps *this*
+                    // dust: the wire runs up the side of the block, and a solid
+                    // block overhead is what it would have to pass through.
+                    if matches!(self.grid.get(up(n)), Block::Dust { .. })
+                        && !self.grid.get(up(p)).conducts()
+                    {
                         out.push(up(n));
                     }
                 }
                 Conn::Side => {
                     if matches!(self.grid.get(n), Block::Dust { .. }) {
                         out.push(n);
-                    } else if matches!(self.grid.get(down(n)), Block::Dust { .. }) {
+                    } else if matches!(self.grid.get(down(n)), Block::Dust { .. })
+                        && !self.grid.get(n).conducts()
+                    {
+                        // Likewise going down: the step is only open if the
+                        // block above the lower dust - which is `n` - is not
+                        // solid.
                         out.push(down(n));
                     }
                 }
