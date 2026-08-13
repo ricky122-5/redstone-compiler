@@ -48,7 +48,6 @@ fn main() {
     // *arrives* is not the question - the question is with how much margin. A
     // link that lands on 1 here lands on 0 in game if our decay model is even
     // slightly generous, and it would be dead in one direction only.
-    let (sf, rf) = (p.set_feed, p.reset_feed);
     println!(
         "{:<15} {:>3} {:>3} {:>4} {:>4} {:>7} {:>6} {:>6} {:>6}",
         "stage", "D", "E", "Q", "Qn", "notD_in", "rGate_D", "enS_in", "enR_in"
