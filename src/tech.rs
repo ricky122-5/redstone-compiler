@@ -530,6 +530,30 @@ pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos, Po
     Ok((a.feeds[1], b.feeds[1], b.feeds[2], b.out, a.out))
 }
 
+/// # Status: boundary ports work in simulation, not in game
+///
+/// **This is a regression against the previous design in one respect, and it is
+/// deliberate but unresolved.** The old latch exposed raw internal feeds; driven
+/// by levers sitting directly on them it was verified correct in Minecraft, but
+/// it could not be composed - the flip-flop built from two of them failed,
+/// because the master\'s Q had to thread into the slave\'s buried feeds.
+///
+/// The boundary ports fix composition in simulation: the flip-flop now captures
+/// a 1, holds while D moves, and captures a 0. In game the latch itself now
+/// fails, at the first stage: with E=1 and D=1 the reset gate asserts, so
+/// `r_gate` sees D=0 while the D port reads high. One fan-out leg is dead.
+///
+/// Decay is ruled out. That leg measured 5 of 15 arriving; routing it with 4
+/// levels of pessimism lifted it to 9 and the game behaves identically. Lowering
+/// `MAX_RUN` globally lifts it further but breaks the placer, whose gate arrays
+/// cannot absorb more repeaters.
+///
+/// So there is a systematic divergence between this simulator and Minecraft on
+/// router-produced wires, and it is now reproducible in the smallest case yet:
+/// one leg, inside one macro, with everything else verified. That is a much
+/// better bug than the flip-flop was, and it is the thing to chase next -
+/// against the router and the dust model, not against the latch.
+///
 /// # Its ports are in the wrong place, and that is the open bug
 ///
 /// `d_a` and `d_b` are the feeds of two *internal* gates - `not_d` and `r_gate` -
