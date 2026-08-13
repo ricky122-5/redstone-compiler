@@ -141,6 +141,15 @@ impl Router {
         r
     }
 
+    /// Which net owns each placed dust cell.
+    ///
+    /// Exposed so an audit can ask the one question keepout cannot answer from
+    /// the grid alone: are two *different* nets electrically adjacent? Dust
+    /// joins to dust, so two legs that merely pass close are one net in game.
+    pub fn owners(&self) -> &HashMap<Pos, NetId> {
+        &self.owner
+    }
+
     /// Set `p` aside so only `net` may route through it.
     pub fn reserve(&mut self, p: Pos, net: NetId) {
         self.reserved.entry(p).or_insert(net);
