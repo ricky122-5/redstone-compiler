@@ -147,23 +147,26 @@ send "forceload add -48 -48 96 96" 2
 send "reload" 3
 send "execute positioned 0.0 0.0 0.0 run function ohm:circuit" 3
 
-# --- sweep every input combination -----------------------------------------
+# --- sweep every input combination, twice, in one world ---------------------
 #
-# One case per server run, each on a freshly created world.
+# One server, one world, every case. The old design booted a fresh server per
+# case, which cost a server start each and - far worse - meant *every* case was
+# a first transition after placement. Nothing in this suite ever asked a gate to
+# respond to a second change.
 #
-# This is slow - a server boot per case - and three faster schemes were tried
-# and all produced readings that disagreed with a fresh world: rebuilding in
-# place (leftovers survive), clearing first (`fill` caps at 32768 blocks and
-# fails silently above it), and offsetting each case in X (`forceload` caps at
-# 256 chunks, so distant cases sit in unticked chunks and read as zero).
+# That mattered enormously. Servers ship `pause-when-empty-seconds=60`: with no
+# player online the world stops ticking a minute in, while commands keep
+# working, so a long single-world run looked exactly like circuits freezing.
+# Three faster schemes were tried and abandoned over readings that were really
+# this. With the pause disabled above, one world is both correct and quicker.
 #
-# Every one of those looked exactly like a compiler bug. Correctness of the
-# measurement matters more here than its speed, because this harness is the only
-# thing standing between "verified" and "verified against our own assumptions".
+# The second pass is the point. It repeats every case in reverse order, so each
+# one is reached from a different predecessor. A combinational circuit must give
+# the same answer regardless of what it computed before; anything that passes
+# ascending and fails descending is holding state it should not.
 CASES=$((1 << NLEV))
-for v in $(seq 0 $((CASES-1))); do
-  send "execute positioned 0.0 0.0 0.0 run function ohm:circuit" 2
-  b=0
+run_case() {
+  local pass=$1 v=$2 b=0
   while read -r x y z; do
     [ -n "$x" ] || continue
     on=$(( (v >> b) & 1 ))
@@ -172,30 +175,13 @@ for v in $(seq 0 $((CASES-1))); do
     b=$((b+1))
   done <<< "$LEVERS"
   sleep "$SETTLE"
-  send "say OHMC_CASE $v" 1
+  send "say OHMC_CASE $pass $v" 1
   send "function ohm:probe" 2
+}
 
-  # Restart onto a virgin world unless this was the last case.
-  if [ "$v" -lt $((CASES-1)) ]; then
-    send "stop" 2
-    wait $SRV 2>/dev/null
-    cp -R "$PK" /tmp/ohm-pack-keep
-    rm -rf world
-    mkdir -p "$(dirname "$PK")"
-    cp -R /tmp/ohm-pack-keep "$PK"
-    rm -rf /tmp/ohm-pack-keep
-    exec 3>&-
-    rm -f cmd; mkfifo cmd; exec 3<>cmd
-    "$JAVA" -Xmx2G -jar server.jar nogui < cmd >> server.log 2>&1 &
-    SRV=$!
-    for _ in $(seq 1 150); do
-      grep -q "Done (" <(tail -40 server.log) && break
-      sleep 2
-    done
-    send "forceload add -48 -48 96 96" 1
-    send "reload" 2
-  fi
-done
+for v in $(seq 0 $((CASES-1))); do run_case 1 "$v"; done
+for v in $(seq $((CASES-1)) -1 0); do run_case 2 "$v"; done
+
 send "stop" 2
 wait $SRV 2>/dev/null
 
@@ -212,34 +198,45 @@ for line in """$TRUTH""".splitlines():
     if m:
         expected[int(m.group(1))] = m.group(2).strip()
 
-observed, levers, case = {}, {}, None
+observed, levers, key = {}, {}, None
 for line in log.splitlines():
-    m = re.search(r"OHMC_CASE (\d+)", line)
+    m = re.search(r"OHMC_CASE (\d+) (\d+)", line)
     if m:
-        case = int(m.group(1)); observed[case] = {}
+        key = (int(m.group(1)), int(m.group(2))); observed[key] = {}
     m = re.search(r"OHMC_BIT (\d+) ([01])", line)
-    if m and case is not None:
-        observed[case][int(m.group(1))] = int(m.group(2))
+    if m and key is not None:
+        observed[key][int(m.group(1))] = int(m.group(2))
     m = re.search(r"OHMC_LEV (\d+) (\S+)", line)
-    if m and case is not None:
-        levers.setdefault(case, {})[int(m.group(1))] = m.group(2)
+    if m and key is not None:
+        levers.setdefault(key, {})[int(m.group(1))] = m.group(2)
 
-fails = 0
+def read(pass_no, v):
+    bits = observed.get((pass_no, v), {})
+    return sum(bits.get(i, 0) << i for i in range(nlamp))
+
+fails = hysteresis = 0
 for v in sorted(expected):
-    bits = observed.get(v, {})
-    got = sum(bits.get(i, 0) << i for i in range(nlamp))
     exp_val = int(re.search(r"=(\d+)", expected[v]).group(1))
+    g1, g2 = read(1, v), read(2, v)
     # Did the harness actually drive the inputs it meant to?
-    seen = levers.get(v, {})
+    seen = levers.get((1, v), {})
     want_bits = {i: str((v >> i) & 1) for i in range(len(seen))}
     bad_drive = [i for i, w in want_bits.items() if seen.get(i) != w]
-    ok = (got == exp_val)
+    ok = (g1 == exp_val and g2 == exp_val)
     fails += not ok
     note = "ok" if ok else "MISMATCH"
+    # Same inputs, different answer depending on what ran before: the circuit
+    # is holding state a combinational design must not have.
+    if g1 != g2:
+        hysteresis += 1
+        note += "  [HISTORY-DEPENDENT]"
     if bad_drive:
         note += f"  [HARNESS: lever(s) {bad_drive} read back wrong]"
-    print(f"  in={v:<4} expected {expected[v]:<12} observed {got:<6} {note}")
+    print(f"  in={v:<4} expected {expected[v]:<12} pass1 {g1:<6} pass2 {g2:<6} {note}")
 print()
-print("FAIL: %d case(s) disagree" % fails if fails else "PASS: Minecraft agrees with the compiler on all %d cases" % len(expected))
+if hysteresis:
+    print(f"{hysteresis} case(s) answered differently on the second pass")
+print("FAIL: %d case(s) disagree" % fails if fails else
+      "PASS: Minecraft agrees with the compiler on all %d cases, both passes" % len(expected))
 sys.exit(1 if fails else 0)
 PYEOF
