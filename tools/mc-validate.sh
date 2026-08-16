@@ -165,15 +165,35 @@ send "execute positioned 0.0 0.0 0.0 run function ohm:circuit" 3
 # the same answer regardless of what it computed before; anything that passes
 # ascending and fails descending is holding state it should not.
 CASES=$((1 << NLEV))
+
+# Only touch levers whose value actually changes.
+#
+# `setblock` on a lever is a remove-then-place, so re-stating a lever it already
+# agrees with still emits a brief unpower/repower glitch. Driving all N levers
+# every case therefore fired 2N edges within a couple of ticks - and a redstone
+# torch burns out after roughly eight toggles in 60 game ticks, then stays out
+# until something updates it. On add2 that pinned the inverter for input bit 3:
+# every lever read back correctly while the circuit answered as though bit 3
+# were still high, for the whole second half of the run.
+#
+# CUR tracks what is on the levers now, so a case only writes the difference.
+CUR=""
 run_case() {
-  local pass=$1 v=$2 b=0
+  local pass=$1 v=$2 b=0 next=""
   while read -r x y z; do
     [ -n "$x" ] || continue
     on=$(( (v >> b) & 1 ))
     st=false; [ "$on" = 1 ] && st=true
-    send "setblock $x $y $z minecraft:lever[face=floor,facing=north,powered=$st]" 0
+    # Was this bit already at that value? $CUR holds one flag per lever.
+    local was
+    was=$(echo "$CUR" | awk -v i=$((b+1)) '{print $i}')
+    if [ "$was" != "$st" ]; then
+      send "setblock $x $y $z minecraft:lever[face=floor,facing=north,powered=$st]" 0
+    fi
+    next="$next $st"
     b=$((b+1))
   done <<< "$LEVERS"
+  CUR="$next"
   sleep "$SETTLE"
   send "say OHMC_CASE $pass $v" 1
   send "function ohm:probe" 2
@@ -219,9 +239,11 @@ for v in sorted(expected):
     exp_val = int(re.search(r"=(\d+)", expected[v]).group(1))
     g1, g2 = read(1, v), read(2, v)
     # Did the harness actually drive the inputs it meant to?
-    seen = levers.get((1, v), {})
-    want_bits = {i: str((v >> i) & 1) for i in range(len(seen))}
-    bad_drive = [i for i, w in want_bits.items() if seen.get(i) != w]
+    bad_drive = []
+    for pass_no in (1, 2):
+        seen = levers.get((pass_no, v), {})
+        want_bits = {i: str((v >> i) & 1) for i in range(len(seen))}
+        bad_drive += [(pass_no, i) for i, w in want_bits.items() if seen.get(i) != w]
     ok = (g1 == exp_val and g2 == exp_val)
     fails += not ok
     note = "ok" if ok else "MISMATCH"

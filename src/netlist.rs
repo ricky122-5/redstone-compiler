@@ -107,6 +107,15 @@ impl Netlist {
         (idx, q)
     }
 
+    /// The signal carrying flip-flop `idx`'s output.
+    ///
+    /// The placer needs this to treat Q as a source, the same way it treats an
+    /// input lever. `sigs` is hash-consed, so the lookup is a scan rather than a
+    /// second map to keep in step.
+    pub fn dff_q(&self, idx: u32) -> Option<Sig> {
+        self.sigs.iter().position(|s| matches!(s, Src::DffQ(i) if *i == idx)).map(|p| p as Sig)
+    }
+
     pub fn set_dff_d(&mut self, idx: u32, d: Sig) {
         self.dffs[idx as usize].d = d;
     }

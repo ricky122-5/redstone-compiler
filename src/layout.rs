@@ -62,6 +62,16 @@ pub struct Layout {
     pub output_lamps: Vec<(String, Vec<Pos>)>,
     pub levels: usize,
     pub gates: usize,
+    /// Clock, inverted clock and reset levers. Empty for a combinational build.
+    ///
+    /// The clock is supplied as two externally driven phases rather than one
+    /// clock and an on-board inverter. A per-flop inverter is 20 gates and a
+    /// second thing to get wrong; two levers are free and let the harness hold
+    /// the non-overlap explicitly.
+    pub clk_lever: Option<Pos>,
+    pub clk_n_lever: Option<Pos>,
+    pub rst_lever: Option<Pos>,
+    pub flops: usize,
 }
 
 struct Placed {
@@ -118,11 +128,21 @@ pub struct RegisterBank {
     pub flops: Vec<DffPorts>,
 }
 
-/// Footprint of one flip-flop macro plus clearance, measured by
-/// `examples/regbank_probe.rs`. Two macros at this pitch were verified to hold
-/// independent values on a shared clock.
-const FLOP_PITCH_X: i32 = 74;
-const FLOP_PITCH_Z: i32 = 160;
+/// Pitch of the register bank.
+///
+/// This is deliberately much larger than a flip-flop's measured extent (67 x 141
+/// blocks, per `examples/flop_size.rs`). The measurement is of a macro stamped
+/// into an empty grid, and it understates the real footprint: the D latch wires
+/// itself with the maze router under bounds reaching `x + 140`, so with a
+/// neighbour in range the router will happily spill into it. Tiling at the
+/// measured extent collided registers 1 and 5.
+///
+/// The pitch therefore clears the internal router's *bounds*, not its typical
+/// output. It is wasteful of space, which costs nothing here - the build is
+/// already sparse and Minecraft does not care - and it removes an entire class
+/// of failure that only appears at some particular register count.
+const FLOP_PITCH_X: i32 = 200;
+const FLOP_PITCH_Z: i32 = 200;
 
 /// Stamp `n` flip-flops in a bank based at `base`.
 pub fn place_register_bank(g: &mut Grid, base: Pos, n: usize) -> Result<RegisterBank, String> {
@@ -144,12 +164,6 @@ pub fn place_register_bank(g: &mut Grid, base: Pos, n: usize) -> Result<Register
 /// floorplan (a clock spine and flip-flop macro cells) that this does not
 /// attempt yet.
 pub fn build(net: &Netlist) -> Result<Layout, String> {
-    if !net.dffs.is_empty() {
-        return Err(format!(
-            "netlist has {} flip-flop(s); only combinational designs can be placed",
-            net.dffs.len()
-        ));
-    }
     let roots = net.roots();
     let level = levelize(net, &roots);
     let order = net.topo_order(&roots);
@@ -192,6 +206,62 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         grid.set(tap, Block::Dust { power: 0 })?;
         source_of.insert(s, tap);
         widest = widest.max(x + 3);
+    }
+
+    // The register bank, and the control levers that drive it.
+    //
+    // Flip-flop Q outputs are *sources* exactly like input levers: the
+    // combinational cone reads them, and `net.roots()` already includes every
+    // flip-flop's D, so levelisation covers the whole sequential cone without
+    // any special casing. All that is missing is somewhere for Q to come from
+    // and somewhere for D to go.
+    //
+    // The bank sits in negative Z, behind the input levers.
+    //
+    // That region is unclaimed - gates occupy the GATE_Z plane and relays run
+    // out in +Z - and, more importantly, it puts the *right end* of each flop
+    // next to the logic. A flip-flop is about 150 blocks deep with Q at its far
+    // +Z face, so a bank placed beyond the riser field leaves Q some 250 blocks
+    // from the gates it feeds and the router simply cannot reach that far.
+    // Growing the bank backwards from the gate plane makes the last row's Q
+    // land a dozen blocks away instead.
+    let mut bank_flops: Vec<crate::tech::DffPorts> = Vec::new();
+    let (mut clk_lever, mut clk_n_lever, mut rst_lever) = (None, None, None);
+    if !net.dffs.is_empty() {
+        let rows = {
+            let cols = (net.dffs.len() as f64).sqrt().ceil().max(1.0) as usize;
+            net.dffs.len().div_ceil(cols) as i32
+        };
+        // Offset by where Q actually sits inside a flop, not by the tiling
+        // pitch. A flip-flop is deep and Q is at its far +Z face, so using the
+        // pitch leaves Q tens of blocks further from the logic than it needs to
+        // be - and the router's reach is the binding constraint here.
+        let q_off = {
+            let mut probe = Grid::new();
+            stamp_dff(&mut probe, (0, 0, 0)).map_err(|e| format!("measuring flop: {e}"))?.q.2
+        };
+        let bank_z = GATE_Z - 12 - q_off - (rows - 1) * FLOP_PITCH_Z;
+        let bank = place_register_bank(&mut grid, (0, lever_y, bank_z), net.dffs.len())?;
+        bank_flops = bank.flops;
+
+        // Control levers, well clear of the data levers.
+        let ctrl_x = -6;
+        for (i, slot) in [&mut clk_lever, &mut clk_n_lever, &mut rst_lever].into_iter().enumerate() {
+            let pos = (ctrl_x - i as i32 * 3, lever_y, GATE_Z - 4);
+            stamp_lever(&mut grid, pos, Material::Clock, false)?;
+            let tap = (pos.0, pos.1, pos.2 + 1);
+            grid.set((tap.0, tap.1 - 1, tap.2), Block::Solid(Material::Clock))?;
+            grid.set(tap, Block::Dust { power: 0 })?;
+            *slot = Some(tap);
+        }
+
+        // Q is a source for the cone that reads it.
+        for i in 0..net.dffs.len() {
+            let q_sig = net
+                .dff_q(i as u32)
+                .ok_or_else(|| format!("flip-flop {i} has no Q signal"))?;
+            source_of.insert(q_sig, bank_flops[i].q);
+        }
     }
 
     // Gates: one row per level, ordered within the row by the average X of the
@@ -495,6 +565,78 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         output_lamps.push((name.clone(), lamps));
     }
 
+    // Sequential nets: every flip-flop's D, and the shared control lines.
+    //
+    // These are routed last, after all gate fan-in, because they are the
+    // longest nets in the build and the router's difficulty ordering only
+    // applies within the gate work list. Doing them here at least means they
+    // route into a grid whose local congestion is already known.
+    if !bank_flops.is_empty() {
+        // A control lever drives every flop, so give each one a spine to branch
+        // from rather than routing many nets out of a single dust cell.
+        let ctrl_spine = |grid: &mut Grid, router: &mut Router, tap: Pos, net_id: Sig| {
+            let mut cells = vec![tap];
+            router.claim(tap, net_id);
+            for t in 1..=SPINE_LEN {
+                let p = (tap.0, tap.1, tap.2 + t);
+                if !grid.is_free(p) || !grid.is_free((p.0, p.1 - 1, p.2)) {
+                    break;
+                }
+                let _ = grid.set((p.0, p.1 - 1, p.2), Block::Solid(Material::Clock));
+                let _ = grid.set(p, Block::Dust { power: 0 });
+                router.claim(p, net_id);
+                cells.push(p);
+            }
+            cells
+        };
+
+        // Control nets get ids past the end of the signal space so they cannot
+        // collide with a real signal's keepout.
+        let base_net = net.sigs.len() as Sig;
+        let clk_src = ctrl_spine(&mut grid, &mut router, clk_lever.unwrap(), base_net);
+        let clkn_src = ctrl_spine(&mut grid, &mut router, clk_n_lever.unwrap(), base_net + 1);
+        let rst_src = ctrl_spine(&mut grid, &mut router, rst_lever.unwrap(), base_net + 2);
+
+        for (i, f) in bank_flops.iter().enumerate() {
+            // D: from whatever the netlist says drives this register.
+            let d_sig = net.dffs[i].d;
+            let sources = spine
+                .get(&d_sig)
+                .cloned()
+                .or_else(|| source_of.get(&d_sig).map(|&p| vec![p]))
+                .ok_or_else(|| format!("flip-flop {i} D signal {d_sig} has no driver"))?;
+            let decay = sources.len() as i32 - 1;
+            router.claim(f.d_feeds[0], d_sig);
+            router
+                .route(&mut grid, d_sig, &sources, f.d_feeds[0], bounds, Material::Wire, decay)
+                .map_err(|e| format!("routing D into flip-flop {i}: {e}"))?;
+
+            for (label, src, dst, id) in [
+                ("clk", &clk_src, f.clk_feeds[0], base_net),
+                ("clk_n", &clkn_src, f.clk_n_feeds[0], base_net + 1),
+            ] {
+                router.claim(dst, id);
+                router
+                    .route(&mut grid, id, src, dst, bounds, Material::Clock, src.len() as i32 - 1)
+                    .map_err(|e| format!("routing {label} into flip-flop {i}: {e}"))?;
+            }
+            for (k, &clr) in f.clr_feeds.iter().enumerate() {
+                router.claim(clr, base_net + 2);
+                router
+                    .route(
+                        &mut grid,
+                        base_net + 2,
+                        &rst_src,
+                        clr,
+                        bounds,
+                        Material::Clock,
+                        rst_src.len() as i32 - 1,
+                    )
+                    .map_err(|e| format!("routing reset {k} into flip-flop {i}: {e}"))?;
+            }
+        }
+    }
+
     // Group input levers by port for the caller.
     let mut by_port: HashMap<u32, Vec<(u32, Pos)>> = HashMap::new();
     for (&s, &pos) in &source_of {
@@ -518,6 +660,10 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         output_lamps,
         levels: max_level as usize + 1,
         gates: gates.len(),
+        clk_lever: clk_lever.map(|t| (t.0, t.1, t.2 - 1)),
+        clk_n_lever: clk_n_lever.map(|t| (t.0, t.1, t.2 - 1)),
+        rst_lever: rst_lever.map(|t| (t.0, t.1, t.2 - 1)),
+        flops: bank_flops.len(),
     })
 }
 
@@ -694,12 +840,35 @@ mod tests {
         }
     }
 
+    /// A netlist with state places: a register bank, a clock and reset
+    /// distributed to it, and Q wired back as a source the combinational cone
+    /// reads.
+    ///
+    /// Ignored because the last step does not work yet. The bank places, the
+    /// control levers are built and Q is registered as a source, but routing Q
+    /// into the logic fails with "no route" - the search exhausts the space
+    /// rather than running out of budget, so the flop's Q cannot reach a gate
+    /// input past the bank's own structures. Moving the bank from beyond the
+    /// riser field into negative Z, and offsetting by where Q actually sits
+    /// rather than by the tiling pitch, took the span from 255 to 77; closing
+    /// the rest needs Q to use the relay chains the placer already builds for
+    /// long lever runs, instead of one direct maze route.
     #[test]
-    fn sequential_netlists_are_rejected() {
+    #[ignore = "register bank places, but Q cannot yet be routed into the logic"]
+    fn sequential_netlists_place() {
         let mut net = Netlist::new();
-        let (_, q) = net.add_dff("r");
+        let (idx, q) = net.add_dff("r");
+        // Feed the flop its own inverted output: the smallest real sequential
+        // circuit there is, and one that cannot be placed without treating Q as
+        // both a source and a sink.
+        let nq = net.nor(&[q]);
+        net.set_dff_d(idx, nq);
         net.outputs.push(("q".into(), vec![q]));
-        let err = match build(&net) { Ok(_) => panic!("expected rejection"), Err(e) => e };
-        assert!(err.contains("flip-flop"), "{err}");
+
+        let layout = build(&net).expect("sequential netlist must place");
+        assert_eq!(layout.flops, 1, "the register bank should hold one flop");
+        assert!(layout.clk_lever.is_some(), "a clocked design needs a clock lever");
+        assert!(layout.rst_lever.is_some(), "a clocked design needs a reset lever");
+        assert!(!layout.grid.is_empty(), "placement produced no blocks");
     }
 }

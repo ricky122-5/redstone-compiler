@@ -769,7 +769,15 @@ pub fn stamp_d_latch(g: &mut Grid, base: Pos) -> Result<DLatchPorts, String> {
     }
 
     let mut router = Router::from_grid(g);
-    let bounds = ((x - 40, y - 30, z - 40), (x + 140, y + 40, z + 9 * DZ + 40));
+    // Tight bounds, deliberately.
+    //
+    // These were generous (x+140, +/-40 in Y and Z) on the theory that giving
+    // the router room costs nothing. It costs a great deal: a macro can only be
+    // tiled at a pitch that clears the *bounds*, because within them the router
+    // will use whatever space it finds, so slack here multiplies by the register
+    // count. At the old bounds a bank had to be pitched 200 apart, which put
+    // 763 blocks between a flip-flop's Q and the logic reading it.
+    let bounds = ((x - 6, y - 20, z - 12), (x + 72, y + 26, z + 9 * DZ + 12));
 
     // Each wire is its own net as far as the router is concerned.
     let wire = |g: &mut Grid, r: &mut Router, net: u32, from: Pos, to: Pos| -> Result<(), String> {
@@ -1054,7 +1062,22 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
 
     // Measure each macro's footprint rather than guessing an offset: a caller
     // cannot see how much room a macro took.
-    let end_z = |g: &Grid| g.bounds().map(|(_, hi)| hi.2).unwrap_or(z);
+    //
+    // Measured against a *snapshot*, not against `g.bounds()`. The whole grid's
+    // extent is the same thing only when this flip-flop is the only thing in it.
+    // Stamped into a register bank it is not: `g.bounds()` then returns the far
+    // edge of every previously placed register, so each successive flip-flop put
+    // its slave beyond all of them and the bank sprawled until it collided.
+    // Registers 1 and 5 first, then 2 and 6 when the pitch was widened - the
+    // signature of an offset that grows with the grid instead of the macro.
+    let before: std::collections::HashSet<Pos> = g.iter().map(|(&p, _)| p).collect();
+    let end_z = |g: &Grid| {
+        g.iter()
+            .filter(|(p, _)| !before.contains(p))
+            .map(|(p, _)| p.2)
+            .max()
+            .unwrap_or(z)
+    };
     // Kept tight on purpose. Widening this to 60 was tried in game to test
     // whether the two latches interfere, and it made things *worse*: the master
     // stopped capturing at all, even though its own structure and its

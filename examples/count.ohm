@@ -1,0 +1,21 @@
+// The smallest program that needs a control FSM.
+//
+// Every other multi-block example (gcd, triangle) is hundreds of gates, which
+// is a bad place to bring up sequential placement. This one loops a fixed
+// number of times over two-bit values, so it has real state and a real FSM
+// while staying small enough to place, simulate and drive in game.
+input  u2 n;
+output u2 c;
+
+fn countdown(u2 k) -> u2 {
+    var u2 t = 0;
+    while (k != 0) {
+        k = k - 1;
+        t = t + 1;
+    }
+    return t;
+}
+
+proc main() {
+    c = countdown(n);
+}

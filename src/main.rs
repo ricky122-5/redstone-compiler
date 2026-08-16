@@ -132,15 +132,26 @@ fn run(args: &[String]) -> Result<(), String> {
     }
 
     if out.is_some() || nbt_out.is_some() || mcfn_out.is_some() {
-        let comb = bitblast::blast_combinational(&design).map_err(|e| {
-            format!(
-                "{e}\n\
-                 note: programs with loops or branches synthesise to a verified gate\n\
-                 note: netlist, but placing them needs a sequential floorplan\n\
-                 note: (clock spine + flip-flop cells) that is not implemented yet."
-            )
-        })?;
-        let layout = layout::build(&comb)?;
+        // Straight-line programs place from the combinational lowering, which
+        // has no FSM and no registers. Anything with a loop or a branch needs
+        // the sequential netlist and the register bank that goes with it.
+        let placed_net = match bitblast::blast_combinational(&design) {
+            Ok(comb) => comb,
+            Err(_) => bitblast::blast(&design),
+        };
+        let layout = layout::build(&placed_net)?;
+        if layout.flops > 0 {
+            println!("  sequential: {} flip-flop(s)", layout.flops);
+            if let Some(p) = layout.clk_lever {
+                println!("  clock   lever at ~{} ~{} ~{}", p.0, p.1, p.2);
+            }
+            if let Some(p) = layout.clk_n_lever {
+                println!("  clock_n lever at ~{} ~{} ~{}", p.0, p.1, p.2);
+            }
+            if let Some(p) = layout.rst_lever {
+                println!("  reset   lever at ~{} ~{} ~{}", p.0, p.1, p.2);
+            }
+        }
 
         if let Some(out_path) = out {
             let s = schem::Schematic::from_grid(&layout.grid);

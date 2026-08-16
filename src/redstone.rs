@@ -323,6 +323,16 @@ pub struct SimState {
     pub tick: u64,
 }
 
+impl SimState {
+    /// How many transitions are still scheduled. Zero is what
+    /// `run_until_stable` treats as settled, so a state with zero pending that
+    /// still disagrees with a fresh run is a genuine fixed point, not a
+    /// half-finished one.
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+}
+
 pub struct Sim<'g> {
     pub grid: &'g Grid,
     pub state: SimState,

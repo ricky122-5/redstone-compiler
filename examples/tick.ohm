@@ -1,0 +1,20 @@
+// The smallest program that needs a control FSM.
+//
+// Every other multi-block example is hundreds of gates, which is a bad place to
+// bring up sequential placement. This one still has a real loop, a real FSM
+// (6 basic blocks) and real state (11 flip-flops), at a fifth of gcd's size.
+input  u1 go;
+output u1 done;
+
+fn spin(u1 k) -> u1 {
+    var u1 t = 0;
+    while (k != 0) {
+        k = k - 1;
+        t = 1;
+    }
+    return t;
+}
+
+proc main() {
+    done = spin(go);
+}
