@@ -158,6 +158,23 @@ pub fn place_register_bank(g: &mut Grid, base: Pos, n: usize) -> Result<Register
     Ok(RegisterBank { flops })
 }
 
+/// # Known: `add.ohm` places but computes the wrong answer
+///
+/// The 8-bit adder places cleanly - 24662 blocks, no unsupported dust, no
+/// history dependence - and gets 44 of 64 sampled inputs wrong. This was
+/// invisible until now: `tools/mc-validate.sh` refuses designs with more than
+/// six input levers and this one has sixteen, so `add.ohm` had never been
+/// checked against anything. `examples/two_pass.rs` samples the input space and
+/// is the first thing able to check it at all.
+///
+/// The errors say where to look. Every difference is a power of two or a sum of
+/// them - 16, 32, 64, 128 - so whole output *bits* are wrong rather than the
+/// arithmetic being off, and they are the high-order bits, which sit at the end
+/// of the longest carry chains. Most deltas are negative: a bit that should be
+/// one reads zero. That is a signal dying, not a logic error, and the suspect is
+/// repeater insertion on long routes rather than anything in the netlist - which
+/// `--truth` confirms is right for the failing cases.
+///
 /// Place and route a purely combinational netlist.
 ///
 /// Returns an error if the netlist contains state: flip-flops need a sequential
