@@ -840,6 +840,60 @@ mod tests {
         }
     }
 
+    /// A combinational design must answer the same regardless of history.
+    ///
+    /// This is the property the in-game harness sweeps for, reduced to a unit
+    /// test. `add2` failed it for the project's whole life: correct on an
+    /// ascending sweep, wrong on eight of sixteen cases descending, because a
+    /// routed net ran beside itself and bridged one of its own repeaters into a
+    /// latch. Nothing else in the suite could see that - every other check
+    /// evaluates a circuit once, from a fresh state, which is exactly the case
+    /// that works.
+    #[test]
+    fn placed_logic_is_history_independent() {
+        use crate::redstone::Sim;
+
+        let src = std::fs::read_to_string("examples/add2.ohm").unwrap();
+        let prog = crate::parser::parse(&src).unwrap();
+        let design = crate::lower::lower_program(&prog).unwrap();
+        let net = crate::bitblast::blast_combinational(&design).unwrap();
+        let lay = build(&net).unwrap();
+
+        let levers: Vec<Pos> = lay.input_levers.iter().flat_map(|(_, v)| v.clone()).collect();
+        let lamps: Vec<Pos> = lay.output_lamps.iter().flat_map(|(_, v)| v.clone()).collect();
+        let n = 1usize << levers.len();
+
+        let mut sim = Sim::new(&lay.grid);
+        let sweep = |sim: &mut Sim, order: Vec<usize>| -> Vec<(usize, usize)> {
+            let mut out = Vec::new();
+            for v in order {
+                for (b, &l) in levers.iter().enumerate() {
+                    sim.set_lever(l, (v >> b) & 1 == 1);
+                }
+                assert!(sim.run_until_stable(20000).1, "case {v} did not settle");
+                let f = sim.field();
+                let got = lamps
+                    .iter()
+                    .enumerate()
+                    .fold(0usize, |a, (i, &p)| a | ((f.block_powered(p) as usize) << i));
+                out.push((v, got));
+            }
+            out
+        };
+
+        let up = sweep(&mut sim, (0..n).collect());
+        let down = sweep(&mut sim, (0..n).rev().collect());
+        let down: HashMap<usize, usize> = down.into_iter().collect();
+        for (v, a) in up {
+            assert_eq!(
+                a, down[&v],
+                "input {v} reads {a} on an ascending sweep and {} on a descending one; \
+                 the placed circuit is holding state it should not",
+                down[&v]
+            );
+        }
+    }
+
     /// A netlist with state places: a register bank, a clock and reset
     /// distributed to it, and Q wired back as a source the combinational cone
     /// reads.

@@ -75,11 +75,26 @@ fn main() {
         (got, stable)
     };
 
-    let n = 1usize << levers.len();
-    let up: Vec<(usize, bool)> = (0..n).map(|v| read(&mut sim, v)).collect();
+    // Enumerating every input stops being possible quickly: `add` has sixteen
+    // levers, so a full sweep is 65536 cases twice over. Cap it and walk a
+    // stride through the space instead - history dependence shows up in any
+    // ordering, and a stride visits pairs of cases that differ in many bits,
+    // which is the transition most likely to expose it.
+    const CAP: usize = 64;
+    let full = 1usize << levers.len();
+    let cases: Vec<usize> = if full <= CAP {
+        (0..full).collect()
+    } else {
+        let stride = full / CAP;
+        (0..CAP).map(|i| (i * stride + i) % full).collect()
+    };
+    println!("sweeping {} of {full} case(s), each way", cases.len());
+
+    let n = cases.len();
+    let up: Vec<(usize, bool)> = cases.iter().map(|&v| read(&mut sim, v)).collect();
     let mut down = vec![(0usize, true); n];
-    for v in (0..n).rev() {
-        down[v] = read(&mut sim, v);
+    for i in (0..n).rev() {
+        down[i] = read(&mut sim, cases[i]);
     }
 
     // Same inputs, two histories: diff the whole machine. Whatever differs is
@@ -194,7 +209,7 @@ fn main() {
     // step flips all four levers at once; doing the same change one lever at a
     // time, settling in between, says whether this is a simultaneous-change
     // hazard or a property of the destination state itself.
-    if n > 8 {
+    if full > 8 && cases.contains(&7) && cases.contains(&8) {
         let step = |sim: &mut Sim, v: usize| {
             for (b, &l) in levers.iter().enumerate() {
                 sim.set_lever(l, (v >> b) & 1 == 1);
@@ -432,9 +447,10 @@ fn main() {
 
     let mut bad = 0;
     println!("{:<5} {:>8} {:>7} {:>7}", "in", "expected", "pass1", "pass2");
-    for v in 0..n {
-        let (g1, s1) = up[v];
-        let (g2, s2) = down[v];
+    for i in 0..n {
+        let v = cases[i];
+        let (g1, s1) = up[i];
+        let (g2, s2) = down[i];
         let ok = g1 == expected[v] && g2 == expected[v];
         bad += !ok as usize;
         let mut note = if ok { "ok".to_string() } else { "MISMATCH".to_string() };
