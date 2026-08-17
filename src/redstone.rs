@@ -331,6 +331,13 @@ impl SimState {
     pub fn pending_len(&self) -> usize {
         self.pending.len()
     }
+
+    /// Drop every scheduled transition. Used when a probe forces a component
+    /// into a chosen state and wants the circuit to react to that alone,
+    /// without a stale schedule undoing it on the next tick.
+    pub fn clear_for_probe(&mut self) {
+        self.pending.clear();
+    }
 }
 
 pub struct Sim<'g> {

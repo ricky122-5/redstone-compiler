@@ -10,6 +10,7 @@
 //! the placed circuit and findable here. If it does not, the model is missing
 //! whatever the game is doing.
 use ohmc::redstone::{Sim, BURNOUT_WINDOW};
+use std::collections::HashMap;
 use ohmc::world::Pos;
 use ohmc::{bitblast, layout, lower, parser};
 
@@ -147,10 +148,207 @@ fn main() {
             println!("  {p:?} fresh={fresh} swept={swept} block={:?}", lay.grid.get(*p));
         }
 
+        // For each torch that settles two ways, show what powers its support in
+        // each state. A torch is lit exactly when its support is unpowered, so
+        // whatever differs here is the immediate cause - and following it back
+        // has to close a loop somewhere.
+        let fa = a.field();
+        let fb = b.field();
+        println!("\nwhy each differing torch differs:");
+        for (t, fresh, swept) in diffs.iter().take(6) {
+            let sup = match lay.grid.get(*t) {
+                ohmc::world::Block::WallTorch { facing, .. } => {
+                    ohmc::world::offset(*t, facing.opposite())
+                }
+                _ => ohmc::world::down(*t),
+            };
+            println!(
+                "  torch {t:?} fresh={fresh} swept={swept}  support {sup:?} powered fresh={} swept={}",
+                fb.block_powered(sup),
+                fa.block_powered(sup)
+            );
+            for d in ohmc::world::Dir::ALL {
+                let n = ohmc::world::offset(sup, d);
+                for c in [n, ohmc::world::up(n), ohmc::world::up(sup)] {
+                    let blk = lay.grid.get(c);
+                    if matches!(blk, ohmc::world::Block::Air) {
+                        continue;
+                    }
+                    let (df, ds) = (fb.dust_at(c), fa.dust_at(c));
+                    if df != ds {
+                        println!("      {c:?} {blk:?} dust fresh={df} swept={ds}");
+                    }
+                }
+            }
+        }
+
         let burnt = a.burned_out();
         println!("burned-out torches after the sweep: {}", burnt.len());
         for t in burnt.iter().take(12) {
             println!("  BURNT {t:?}");
+        }
+    }
+
+    // Minimal reproduction. The descending pass is clean from 15 down to 8 and
+    // wrong from 7 down, so the single transition 8 -> 7 is the trigger. That
+    // step flips all four levers at once; doing the same change one lever at a
+    // time, settling in between, says whether this is a simultaneous-change
+    // hazard or a property of the destination state itself.
+    {
+        let step = |sim: &mut Sim, v: usize| {
+            for (b, &l) in levers.iter().enumerate() {
+                sim.set_lever(l, (v >> b) & 1 == 1);
+            }
+            sim.run_until_stable(20000);
+        };
+        let peek = |sim: &Sim| {
+            let f = sim.field();
+            lamps.iter().enumerate().fold(0usize, |a, (i, &p)| a | ((f.block_powered(p) as usize) << i))
+        };
+
+        let mut s1 = Sim::new(&lay.grid);
+        step(&mut s1, 8);
+        let at8 = peek(&s1);
+        step(&mut s1, 7);
+        println!("\nall four levers at once: 8 -> 7 gives {} (expected {})", peek(&s1), expected[7]);
+        println!("  (case 8 read {} , expected {})", at8, expected[8]);
+
+        let mut s2 = Sim::new(&lay.grid);
+        step(&mut s2, 8);
+        // 8 = 1000, 7 = 0111: walk one lever at a time, settling after each.
+        let mut cur = 8usize;
+        for b in 0..levers.len() {
+            let want = (7 >> b) & 1;
+            if (cur >> b) & 1 != want {
+                cur = (cur & !(1 << b)) | (want << b);
+                step(&mut s2, cur);
+            }
+        }
+        println!("one lever at a time: 8 -> 7 gives {} (expected {})", peek(&s2), expected[7]);
+
+        // And straight to 7 from power-up, for reference.
+        let mut s3 = Sim::new(&lay.grid);
+        step(&mut s3, 7);
+        println!("from power-up:      7 gives {} (expected {})", peek(&s3), expected[7]);
+
+        // Which torches hold the wrong state, and is the wrongness
+        // self-sustaining? Flip one torch back to its correct value and settle.
+        // If the whole circuit falls into the right answer, that torch is
+        // inside the loop; if it snaps back, something else is holding it.
+        let bad = s1.state.clone();
+        let good = s3.state.clone();
+        let mut wrong: Vec<Pos> = good
+            .torch_lit
+            .iter()
+            .filter(|(p, v)| bad.torch_lit.get(p) != Some(*v))
+            .map(|(&p, _)| p)
+            .collect();
+        wrong.sort();
+        // All at once: if the six together are a self-sustaining loop, fixing
+        // the whole set holds; if something outside drives them, it snaps back.
+        {
+            let mut probe = Sim::new(&lay.grid);
+            probe.state = bad.clone();
+            for t in good.torch_lit.keys() {
+                if bad.torch_lit.get(t) != good.torch_lit.get(t) {
+                    probe.state.torch_lit.insert(*t, good.torch_lit[t]);
+                }
+            }
+            probe.run_until_stable(20000);
+            println!(
+                "\nall wrong torches forced good -> {} (expected {})",
+                peek(&probe),
+                expected[7]
+            );
+            let mut probe2 = Sim::new(&lay.grid);
+            probe2.state = bad.clone();
+            for r in good.repeater_powered.keys() {
+                if bad.repeater_powered.get(r) != good.repeater_powered.get(r) {
+                    probe2.state.repeater_powered.insert(*r, good.repeater_powered[r]);
+                }
+            }
+            probe2.run_until_stable(20000);
+            println!("all wrong repeaters forced good -> {}", peek(&probe2));
+        }
+
+        // Discover the real driver graph by perturbation rather than geometry.
+        // From the correct state, flip one torch and run a couple of ticks:
+        // whatever else moves is genuinely downstream of it, by the simulator's
+        // own rules. Hand-rolled geometry has missed this loop three times.
+        {
+            let torches: Vec<Pos> = good.torch_lit.keys().copied().collect();
+            let mut edges: HashMap<Pos, Vec<Pos>> = HashMap::new();
+            for &t in &torches {
+                let mut probe = Sim::new(&lay.grid);
+                probe.state = good.clone();
+                let flipped = !good.torch_lit[&t];
+                probe.state.torch_lit.insert(t, flipped);
+                probe.state.clear_for_probe();
+                // Hold it forced. `step` recomputes every torch from its
+                // support, so a flip that is not re-applied is undone on the
+                // next tick and downstream sees only a one-tick pulse - which
+                // is why the first version of this probe found nothing.
+                for _ in 0..6 {
+                    probe.state.torch_lit.insert(t, flipped);
+                    probe.step();
+                }
+                probe.state.torch_lit.insert(t, flipped);
+                let mut moved: Vec<Pos> = probe
+                    .state
+                    .torch_lit
+                    .iter()
+                    .filter(|(p, v)| **p != t && good.torch_lit.get(p) != Some(*v))
+                    .map(|(&p, _)| p)
+                    .collect();
+                moved.sort();
+                edges.insert(t, moved);
+            }
+            // Any cycle in that graph is the bug.
+            let mut colour: HashMap<Pos, u8> = HashMap::new();
+            let mut stk: Vec<Pos> = Vec::new();
+            fn dfs(n: Pos, e: &HashMap<Pos, Vec<Pos>>, c: &mut HashMap<Pos, u8>, s: &mut Vec<Pos>) -> Option<Vec<Pos>> {
+                c.insert(n, 1);
+                s.push(n);
+                for &m in e.get(&n).into_iter().flatten() {
+                    match c.get(&m).copied().unwrap_or(0) {
+                        1 => { let at = s.iter().position(|&x| x == m).unwrap(); return Some(s[at..].to_vec()); }
+                        0 => { if let Some(r) = dfs(m, e, c, s) { return Some(r); } }
+                        _ => {}
+                    }
+                }
+                s.pop();
+                c.insert(n, 2);
+                None
+            }
+            let mut ks: Vec<Pos> = edges.keys().copied().collect();
+            ks.sort();
+            let mut found = None;
+            for k in ks {
+                if colour.get(&k).copied().unwrap_or(0) == 0 {
+                    if let Some(cyc) = dfs(k, &edges, &mut colour, &mut stk) { found = Some(cyc); break; }
+                }
+            }
+            match found {
+                Some(c) => {
+                    println!("\nFEEDBACK LOOP, {} gate(s):", c.len());
+                    for t in &c { println!("  torch {t:?}"); }
+                }
+                None => println!("\nperturbation finds no loop either"),
+            }
+        }
+
+        println!("\n{} torch(es) hold the wrong state at input 7:", wrong.len());
+        for t in &wrong {
+            let mut probe = Sim::new(&lay.grid);
+            probe.state = bad.clone();
+            let fixed = good.torch_lit[t];
+            probe.state.torch_lit.insert(*t, fixed);
+            probe.run_until_stable(20000);
+            let got = peek(&probe);
+            println!(
+                "  {t:?} forced to {fixed} -> circuit reads {got} ({})",
+                if got == expected[7] { "RECOVERS - inside the loop" } else { "still wrong" }
+            );
         }
     }
 

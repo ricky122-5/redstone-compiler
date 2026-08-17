@@ -33,6 +33,20 @@ fn flood(g: &Grid, start: Pos, label: usize, owner: &mut HashMap<Pos, usize>) ->
                     v.push(up(n));
                     v.push(down(n));
                 }
+                // Dust weakly powers the block it sits on, and a repeater
+                // facing that block reads it. This is how most signals leave a
+                // wire, and following only dust-to-dust misses every one of
+                // them - so any loop closed through a repeater fed off a wire
+                // is invisible.
+                let sub = down(q);
+                for d in Dir::ALL {
+                    let r = offset(sub, d);
+                    if let Block::Repeater { facing, .. } = g.get(r) {
+                        if offset(r, facing) == sub {
+                            v.push(r);
+                        }
+                    }
+                }
                 v
             }
             // A repeater is a one-way valve: carry on out its far side only.
@@ -80,8 +94,15 @@ fn find_cycle(g: &Grid) -> Option<Vec<Pos>> {
         }
         for d in Dir::ALL {
             let n = offset(above, d);
-            if matches!(g.get(n), Block::Dust { .. }) {
-                seeds.push(n);
+            match g.get(n) {
+                Block::Dust { .. } => seeds.push(n),
+                // A repeater reading *from* this torch's output block carries
+                // the signal onward. Seeding only dust misses every net that
+                // leaves a gate through a refresh repeater - which the router
+                // inserts constantly - and so misses any loop closed through
+                // one.
+                Block::Repeater { facing, .. } if offset(n, facing) == above => seeds.push(n),
+                _ => {}
             }
         }
         let mut owner = HashMap::new();
@@ -233,6 +254,58 @@ fn main() {
         }
     }
     shorted.sort();
+    // Self-loops first: a gate whose own output reaches its own support is the
+    // original NOR-oscillator bug, and the cycle search deliberately skips them.
+    {
+        let mut selfies = Vec::new();
+        for (&p, &b) in g.iter() {
+            let sup = match b {
+                Block::WallTorch { facing, .. } => offset(p, facing.opposite()),
+                Block::Torch { .. } => down(p),
+                _ => continue,
+            };
+            let above = up(p);
+            let mut seeds = Vec::new();
+            // A torch strongly powers the block above it only if that block
+            // conducts. When it is air the torch drives nothing there, and
+            // treating its neighbours as the gate's output sweeps in the gate's
+            // own input pad - which invents a self-loop at every cell.
+            if g.get(above).conducts() {
+                for d in Dir::ALL {
+                    let n = offset(above, d);
+                    match g.get(n) {
+                        Block::Dust { .. } => seeds.push(n),
+                        Block::Repeater { facing, .. } if offset(n, facing) == above => {
+                            seeds.push(n)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // The output the cell library actually uses: dust beside the torch.
+            for d in Dir::ALL {
+                let n = offset(p, d);
+                if matches!(g.get(n), Block::Dust { .. }) {
+                    seeds.push(n);
+                }
+            }
+            let mut own = HashMap::new();
+            for s in seeds {
+                flood(g, s, 0, &mut own);
+            }
+            let feeds_self = own.keys().any(|&c| {
+                down(c) == sup || Dir::ALL.iter().any(|&d| offset(c, d) == sup)
+            });
+            if feeds_self {
+                selfies.push((p, sup));
+            }
+        }
+        println!("{} gate(s) whose own output reaches their own support:", selfies.len());
+        for (t, sup) in selfies.iter().take(10) {
+            println!("  torch {t:?} support {sup:?}");
+        }
+    }
+
     match find_cycle(g) {
         Some(c) => {
             println!("\nFEEDBACK LOOP through {} gate(s):", c.len());
