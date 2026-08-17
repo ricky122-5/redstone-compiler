@@ -194,7 +194,7 @@ fn main() {
     // step flips all four levers at once; doing the same change one lever at a
     // time, settling in between, says whether this is a simultaneous-change
     // hazard or a property of the destination state itself.
-    {
+    if n > 8 {
         let step = |sim: &mut Sim, v: usize| {
             for (b, &l) in levers.iter().enumerate() {
                 sim.set_lever(l, (v >> b) & 1 == 1);
@@ -269,6 +269,84 @@ fn main() {
             }
             probe2.run_until_stable(20000);
             println!("all wrong repeaters forced good -> {}", peek(&probe2));
+        }
+
+        // Who actually powers the level-1 gate's input pad in the wrong state?
+        //
+        // Dust loses exactly one level per step, so the chain back to a source
+        // is unambiguous: from a cell at level L, the cell that fed it is a
+        // neighbour at L+1. Walk that until it runs out, then name whatever
+        // component sits next to the end. A level-1 gate's input must come from
+        // a lever; if this trace ends at a torch, that torch is feeding
+        // backwards and is the loop.
+        {
+            let fbad = s1.field();
+            // The shallowest wrong torch is the one worth tracing.
+            let backtrace_from = wrong.iter().min_by_key(|p| -p.1).copied();
+            if backtrace_from.is_none() {
+                println!("\nno torch holds the wrong state - nothing to backtrace");
+            }
+            let t = backtrace_from.unwrap_or((0, 0, 0));
+            if backtrace_from.is_some() {
+            let sup = match lay.grid.get(t) {
+                ohmc::world::Block::WallTorch { facing, .. } => {
+                    ohmc::world::offset(t, facing.opposite())
+                }
+                _ => ohmc::world::down(t),
+            };
+            let mut cur = ohmc::world::up(sup);
+            println!("\nbacktrace from {t:?} (support {sup:?}, pad {cur:?}):");
+            for _ in 0..40 {
+                let lv = fbad.dust_at(cur);
+                println!("  {cur:?} level {lv} {:?}", lay.grid.get(cur));
+                if lv == 0 {
+                    break;
+                }
+                let mut nxt = None;
+                for d in ohmc::world::Dir::ALL {
+                    let n = ohmc::world::offset(cur, d);
+                    for c in [n, ohmc::world::up(n), ohmc::world::down(n)] {
+                        if fbad.dust_at(c) > lv {
+                            nxt = Some(c);
+                        }
+                    }
+                    // A source sitting right next to this cell ends the walk.
+                    match lay.grid.get(n) {
+                        ohmc::world::Block::WallTorch { .. } | ohmc::world::Block::Torch { .. } => {
+                            println!("    <- driven by TORCH {n:?} lit={:?}", s1.state.torch_lit.get(&n));
+                        }
+                        ohmc::world::Block::Repeater { facing, .. }
+                            if ohmc::world::offset(n, facing.opposite()) == cur =>
+                        {
+                            println!("    <- driven by REPEATER {n:?} powered={:?}", s1.state.repeater_powered.get(&n));
+                        }
+                        ohmc::world::Block::Lever { .. } => {
+                            println!("    <- driven by LEVER {n:?} on={:?}", s1.state.lever_on.get(&n));
+                        }
+                        _ => {}
+                    }
+                }
+                // Ending at a repeater is not the end of the chain: hop to
+                // whatever it reads and keep going, or the trace stops one step
+                // short of the answer every time.
+                if nxt.is_none() {
+                    for d in ohmc::world::Dir::ALL {
+                        let n = ohmc::world::offset(cur, d);
+                        if let ohmc::world::Block::Repeater { facing, .. } = lay.grid.get(n) {
+                            if ohmc::world::offset(n, facing.opposite()) == cur {
+                                let src = ohmc::world::offset(n, facing);
+                                println!("    hop through repeater {n:?} to its input {src:?} {:?}", lay.grid.get(src));
+                                nxt = Some(src);
+                            }
+                        }
+                    }
+                }
+                match nxt {
+                    Some(n) => cur = n,
+                    None => break,
+                }
+            }
+            }
         }
 
         // Discover the real driver graph by perturbation rather than geometry.

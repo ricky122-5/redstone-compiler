@@ -48,6 +48,10 @@ pub struct Router {
     /// from taking all of them - which walls the target in completely and sends
     /// the router off to burn its whole search budget looking for a way in.
     reserved: HashMap<Pos, NetId>,
+    /// Endpoints deliberately attached to: gate outputs and feed stubs. Same-net
+    /// keepout has to let a wire touch these, because connecting to them is the
+    /// whole point; everywhere else a net must stay clear of itself.
+    claimed: HashSet<Pos>,
     /// Cells temporarily barred while retrying a single route. Cleared between
     /// routes; this is what lets rip-up-and-retry escape a bad path shape.
     scratch: HashSet<Pos>,
@@ -112,6 +116,7 @@ impl Router {
     pub fn from_grid(grid: &Grid) -> Router {
         let mut r = Router {
             owner: HashMap::new(),
+            claimed: HashSet::new(),
             reserved: HashMap::new(),
             blocked: HashSet::new(),
             scratch: HashSet::new(),
@@ -164,6 +169,7 @@ impl Router {
     /// an input feed), so routes for that net may attach to it.
     pub fn claim(&mut self, p: Pos, net: NetId) {
         self.owner.insert(p, net);
+        self.claimed.insert(p);
         self.blocked.remove(&p);
     }
 
@@ -204,15 +210,26 @@ impl Router {
         if !grid.is_free(up(q)) || self.owner.contains_key(&up(q)) {
             return false;
         }
-        // Keepout: no other net's wire orthogonally adjacent or in a slope
+        // Keepout: no *other* net's wire orthogonally adjacent or in a slope
         // relationship. Either would short the two nets together.
+        //
+        // A net must also stay clear of itself, everywhere except the endpoints
+        // it is meant to attach to. Two fanout branches of one net running side
+        // by side look harmless - same signal either way - but where one passes
+        // beside the other's repeater it bridges that repeater's output back to
+        // its input, and the net becomes a self-sustaining loop. That is a latch
+        // in the middle of combinational logic, and it is what made `add2`
+        // answer correctly from power-up and wrongly once it had been driven
+        // into the second stable state.
         for d in Dir::ALL {
             let n = offset(q, d);
-            if self.owned_by_other(n, net)
-                || self.owned_by_other(up(n), net)
-                || self.owned_by_other(down(n), net)
-            {
-                return false;
+            for c in [n, up(n), down(n)] {
+                if self.owned_by_other(c, net) {
+                    return false;
+                }
+                if self.owner.contains_key(&c) && !self.claimed.contains(&c) {
+                    return false;
+                }
             }
         }
         // Same column, within two levels: the two nodes' substrate and
@@ -361,6 +378,34 @@ impl Router {
             for w in ys.windows(2) {
                 if w[1] - w[0] < 3 {
                     return Some((x, w[1], z));
+                }
+            }
+        }
+
+        // A path must not touch itself.
+        //
+        // Keepout only rejects adjacency to *other* nets, and a path's own
+        // cells are not in `owner` while it is being searched, so nothing
+        // stopped a wire running alongside itself one cell over. Where it does
+        // that around one of its own repeaters, the parallel run bridges the
+        // repeater's output back to its input and the net becomes a
+        // self-sustaining loop - a latch in the middle of combinational logic.
+        //
+        // That is what made `add2` history-dependent: correct from power-up,
+        // and stuck in a second stable state once it had been driven there.
+        let index: HashMap<Pos, usize> = path.iter().enumerate().map(|(i, &p)| (p, i)).collect();
+        for (i, &p) in path.iter().enumerate() {
+            for d in Dir::ALL {
+                let n = offset(p, d);
+                // Dust joins across a one-block step as well as flat.
+                for c in [n, up(n), down(n)] {
+                    if let Some(&j) = index.get(&c) {
+                        // Consecutive nodes are meant to touch; anything else is
+                        // the wire shorting to a different part of itself.
+                        if i.abs_diff(j) > 1 {
+                            return Some(c);
+                        }
+                    }
                 }
             }
         }
