@@ -72,6 +72,11 @@ pub struct Layout {
     pub clk_n_lever: Option<Pos>,
     pub rst_lever: Option<Pos>,
     pub flops: usize,
+    /// Where each NOR gate's signal ended up: its output dust and its input
+    /// pads. Exposed so a placed circuit can be diffed against the netlist gate
+    /// by gate - the only way to find *which* gate first disagrees, rather than
+    /// only that the outputs are wrong.
+    pub gate_cells: HashMap<Sig, (Pos, Vec<Pos>)>,
 }
 
 struct Placed {
@@ -681,6 +686,10 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         clk_n_lever: clk_n_lever.map(|t| (t.0, t.1, t.2 - 1)),
         rst_lever: rst_lever.map(|t| (t.0, t.1, t.2 - 1)),
         flops: bank_flops.len(),
+        gate_cells: placed
+            .iter()
+            .map(|(&sig, p)| (sig, (p.cell.out, p.cell.feeds.clone())))
+            .collect(),
     })
 }
 

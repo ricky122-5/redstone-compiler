@@ -126,6 +126,36 @@ impl Router {
             if b != Block::Air {
                 r.blocked.insert(p);
             }
+            // Levers and torches energise every dust cell orthogonally beside
+            // them, exactly as a wire does, so keepout has to see them too.
+            // Marking only dust left a hole: a route could run right alongside
+            // an input lever or a gate's torch and be driven to full strength by
+            // it, with no wire anywhere between them.
+            //
+            // That is what broke `add.ohm`. One gate's input pad read 12 while
+            // its own driver output 0, and following the dust levels back led to
+            // a cell sitting beside an input lever fifteen levels up. Whole
+            // high-order sum bits were wrong because the carry chain was being
+            // fed by a lever it merely passed by.
+            // A lever energises every dust cell orthogonally beside it, so no
+            // wire may *occupy* one of those cells. Block them rather than
+            // giving the lever an owner: ownership keeps routes two cells clear,
+            // which walls in the lever row and stops `add` routing at all, while
+            // blocking is the exact constraint - do not sit here.
+            //
+            // The intended tap is one of those neighbours and is already
+            // blocked, like every placed cell; `claim` unblocks it when a route
+            // legitimately starts there.
+            //
+            // This is what broke `add.ohm`: a gate's input pad read 12 while its
+            // own driver output 0, and following the dust levels back ended at a
+            // cell sitting beside an input lever fifteen levels above. The carry
+            // chain was being fed by a lever it merely passed.
+            if matches!(b, Block::Lever { .. }) {
+                for d in Dir::ALL {
+                    r.blocked.insert(offset(p, d));
+                }
+            }
             if matches!(b, Block::Dust { .. }) {
                 // Give existing dust an owner so keepout keeps routes away from
                 // it. `claim` overrides this for cell outputs and feed stubs,
