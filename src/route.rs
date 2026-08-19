@@ -48,6 +48,19 @@ pub struct Router {
     /// from taking all of them - which walls the target in completely and sends
     /// the router off to burn its whole search budget looking for a way in.
     reserved: HashMap<Pos, NetId>,
+    /// Cells beside a lever's support block, mapped to that lever. A powered
+    /// lever strongly powers its support, and the support energises every dust
+    /// cell beside it - so only the net that actually attaches to the lever may
+    /// put wire in these cells.
+    lever_hazard: HashMap<Pos, Pos>,
+    /// The endpoints of the route currently being searched: its sources and
+    /// its target. The same-net keepout exemption applies to these and nothing
+    /// else. It used to apply to every `claimed` cell, which let a route run
+    /// alongside a *relay* of its own net - relay ends are claimed - and bridge
+    /// the relay's input to its output around the repeater. That ring is a
+    /// self-sustaining loop: the same latch-in-combinational-logic disease as
+    /// the add2 bug, one mechanism further along.
+    active_endpoints: HashSet<Pos>,
     /// Endpoints deliberately attached to: gate outputs and feed stubs. Same-net
     /// keepout has to let a wire touch these, because connecting to them is the
     /// whole point; everywhere else a net must stay clear of itself.
@@ -116,6 +129,8 @@ impl Router {
     pub fn from_grid(grid: &Grid) -> Router {
         let mut r = Router {
             owner: HashMap::new(),
+            lever_hazard: HashMap::new(),
+            active_endpoints: HashSet::new(),
             claimed: HashSet::new(),
             reserved: HashMap::new(),
             blocked: HashSet::new(),
@@ -151,9 +166,36 @@ impl Router {
             // own driver output 0, and following the dust levels back ended at a
             // cell sitting beside an input lever fifteen levels above. The carry
             // chain was being fed by a lever it merely passed.
-            if matches!(b, Block::Lever { .. }) {
+            if let Block::Lever { face, facing, .. } = b {
                 for d in Dir::ALL {
                     r.blocked.insert(offset(p, d));
+                }
+                // The block the lever is attached to is *strongly* powered
+                // whenever the lever is on, and a strongly powered block
+                // energises every dust cell beside it. In add.ohm a route ran
+                // one level down, orthogonally beside a lever's support block,
+                // and read 15 whenever that unrelated input was on - correct
+                // whenever the neighbouring lever happened to be off, which is
+                // why half the sampled cases passed.
+                //
+                // These cells cannot simply be blocked: the lever's *own* net
+                // legitimately descends right past its support, and hard
+                // blocking the ring walls off the row and add stops routing at
+                // all. So they go in a hazard map instead, and `placeable`
+                // rejects them only for nets that do not attach to this lever.
+                let support = match face {
+                    crate::world::Face::Floor => crate::world::down(p),
+                    crate::world::Face::Ceiling => up(p),
+                    crate::world::Face::Wall => offset(p, facing.opposite()),
+                };
+                for c in Dir::ALL
+                    .iter()
+                    .map(|&d| offset(support, d))
+                    .chain([crate::world::down(support)])
+                {
+                    if c != p {
+                        r.lever_hazard.insert(c, p);
+                    }
                 }
             }
             if matches!(b, Block::Dust { .. }) {
@@ -191,6 +233,40 @@ impl Router {
     }
 
     /// Forbid any route from using `p`.
+    /// Can `net` stamp a relay (dust, repeater, dust along +Z) at `pos`?
+    ///
+    /// Relays are written with direct `grid.set`, not routed, so nothing else
+    /// ever asks whether the site is clear. That is how `add.ohm` ended up
+    /// wrong: a relay's input dust was stamped diagonally adjacent to another
+    /// net's descending wire, joining net 41 to net 42 - the placement passed
+    /// every geometric audit because each wire was individually legal, and the
+    /// junction was created by the stamp that never looked.
+    pub fn relay_site_clear(&self, grid: &Grid, pos: Pos, net: NetId) -> bool {
+        let inp = (pos.0, pos.1, pos.2 - 1);
+        let out = (pos.0, pos.1, pos.2 + 1);
+        // The dust ends get the full wire-placement rule.
+        if !self.placeable(grid, inp, net) || !self.placeable(grid, out, net) {
+            return false;
+        }
+        // The repeater cell: free, not reserved, and nothing foreign beside it.
+        if self.blocked.contains(&pos) || self.scratch.contains(&pos) || !grid.is_free(pos) {
+            return false;
+        }
+        if matches!(self.reserved.get(&pos), Some(&r) if r != net) {
+            return false;
+        }
+        for d in Dir::ALL {
+            let n = offset(pos, d);
+            if self.owned_by_other(n, net)
+                || self.owned_by_other(up(n), net)
+                || self.owned_by_other(down(n), net)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn block(&mut self, p: Pos) {
         self.blocked.insert(p);
     }
@@ -228,6 +304,18 @@ impl Router {
         if !grid.is_free(q) {
             return false;
         }
+        // Beside a lever's support block: allowed only for the net that
+        // attaches to that lever, identified by owning a cell next to it.
+        if let Some(&lev) = self.lever_hazard.get(&q) {
+            let attached = Dir::ALL
+                .iter()
+                .map(|&d| offset(lev, d))
+                .chain([up(lev), down(lev)])
+                .any(|n| matches!(self.owner.get(&n), Some(&o) if o == net));
+            if !attached {
+                return false;
+            }
+        }
         // Substrate must be placeable solid, and must not be someone's dust.
         let sub = down(q);
         if self.owner.contains_key(&sub) {
@@ -257,7 +345,7 @@ impl Router {
                 if self.owned_by_other(c, net) {
                     return false;
                 }
-                if self.owner.contains_key(&c) && !self.claimed.contains(&c) {
+                if self.owner.contains_key(&c) && !self.active_endpoints.contains(&c) {
                     return false;
                 }
             }
@@ -562,6 +650,9 @@ impl Router {
     ) -> Result<(), String> {
         let from = sources[0];
         self.scratch.clear();
+        self.active_endpoints.clear();
+        self.active_endpoints.extend(sources.iter().copied());
+        self.active_endpoints.insert(to);
         let slopes = [14, 40, 120, 400];
         let mut last_err = String::from("no attempt made");
         for attempt in 0..24 {

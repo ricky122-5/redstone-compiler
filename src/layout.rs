@@ -77,6 +77,11 @@ pub struct Layout {
     /// by gate - the only way to find *which* gate first disagrees, rather than
     /// only that the outputs are wrong.
     pub gate_cells: HashMap<Sig, (Pos, Vec<Pos>)>,
+    /// The router's final ownership map: which signal each wire cell carries.
+    /// The audit that finds a wire joined to the wrong driver needs exactly
+    /// this - the cell where ownership changes from one net to another is the
+    /// join.
+    pub wire_owner: HashMap<Pos, u32>,
 }
 
 struct Placed {
@@ -549,10 +554,24 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             let rx = chain_x[(stage - 1) as usize];
             let rz = RISER_Z0 + slot * stage_band + (stage - 1) * RISER_PITCH;
             let ry = top - stage * (drop / stages);
-            let (rin, rout) = stamp_relay(&mut grid, (rx, ry, rz))?;
+            // stamp_relay writes with grid.set and never consults keepout, so
+            // the site has to be checked here or the relay can land touching
+            // another net's wire - which electrically joins the two nets and is
+            // exactly what made add.ohm compute wrong answers while passing
+            // every audit that only looked at routed cells. Probe candidates
+            // near the nominal site and take the first clear one.
+            let site = (0..8)
+                .flat_map(|dz| [0, 1, -1, 2, -2].map(|dx| (rx + dx, ry, rz + dz)))
+                .find(|&c| router.relay_site_clear(&grid, c, src))
+                .ok_or_else(|| {
+                    format!(
+                        "no clear relay site near ({rx}, {ry}, {rz}) for net {src}                          into gate {g} input {j}"
+                    )
+                })?;
+            let (rin, rout) = stamp_relay(&mut grid, site)?;
             router.claim(rin, src);
             router.claim(rout, src);
-            router.block((rx, ry, rz));
+            router.block(site);
             router
                 .route(&mut grid, src, &from, rin, bounds, Material::Wire, carry)
                 .map_err(|e| {
@@ -690,6 +709,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             .iter()
             .map(|(&sig, p)| (sig, (p.cell.out, p.cell.feeds.clone())))
             .collect(),
+        wire_owner: router.owners().clone(),
     })
 }
 
@@ -907,6 +927,30 @@ mod tests {
             out
         };
 
+        // Truth from the gate netlist: the placed circuit must not merely be
+        // consistent between passes, it must be *right*. History-independence
+        // alone would pass a circuit that is deterministically wrong - which is
+        // exactly what add.ohm was, for three distinct router bugs, until the
+        // sampled sweep in examples/two_pass.rs existed to notice.
+        let gs = crate::netlist::GateSim::new(&net);
+        let expect = |v: usize| -> usize {
+            let (mut vals, mut rest) = (Vec::new(), v as u64);
+            for p in &design.inputs {
+                vals.push(rest & ((1u64 << p.width) - 1));
+                rest >>= p.width;
+            }
+            let mut got = 0usize;
+            let mut bit = 0;
+            for (name, sigs) in &net.outputs {
+                let val = gs.read_output(name, &vals, false);
+                for k in 0..sigs.len() {
+                    got |= (((val >> k) & 1) as usize) << bit;
+                    bit += 1;
+                }
+            }
+            got
+        };
+
         let up = sweep(&mut sim, (0..n).collect());
         let down = sweep(&mut sim, (0..n).rev().collect());
         let down: HashMap<usize, usize> = down.into_iter().collect();
@@ -917,6 +961,7 @@ mod tests {
                  the placed circuit is holding state it should not",
                 down[&v]
             );
+            assert_eq!(a, expect(v), "input {v}: placed circuit disagrees with the netlist");
         }
     }
 

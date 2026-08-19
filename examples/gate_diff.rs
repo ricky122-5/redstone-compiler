@@ -25,6 +25,18 @@ fn main() {
     let lay = layout::build(&net).unwrap();
 
     let levers: Vec<Pos> = lay.input_levers.iter().flat_map(|(_, v)| v.clone()).collect();
+    if std::env::var("OHMC_LEVMAP").is_ok() {
+        for (i, l) in levers.iter().enumerate() {
+            println!("levers[{i:>2}] = {l:?}");
+        }
+        // The other side of the mapping: which (port,bit) the netlist thinks
+        // each input signal is, and where gate wiring expects its lever.
+        for sig in 0..net.sigs.len() as u32 {
+            if let Src::Input { port, bit } = *net.src(sig) {
+                println!("sig {sig:>3} = port{port} bit{bit}");
+            }
+        }
+    }
     println!("{path} case {case}: {} levers, {} gates", levers.len(), lay.gates);
 
     // Exact per-signal values from the netlist.
@@ -86,6 +98,7 @@ fn main() {
     // Backtrace any pad that is powered while its own driver is not: dust drops
     // exactly one level per step, so following rising levels leads to whatever
     // is actually energising the wire.
+    let mut suspects = 0;
     for sig in net.topo_order(&roots) {
         if !matches!(net.src(sig), Src::Nor(_)) {
             continue;
@@ -93,21 +106,24 @@ fn main() {
         let Some((_, feeds)) = lay.gate_cells.get(&sig) else { continue };
         for (i, &fd) in feeds.iter().enumerate() {
             let Some(op) = net.operands(sig).get(i).copied() else { continue };
-            let Some(drv) = lay.gate_cells.get(&op).map(|(o, _)| f.dust_at(*o)) else {
-                // Driven by a lever, not a gate: there is no gate output to
-                // compare against, and defaulting one to zero invented a
-                // "driver outputs 0" report for every correctly-driven input.
-                continue;
-            };
-            if f.dust_at(fd) == 0 || drv > 0 || truth[op as usize] {
+            // Gate-driven pads are suspect when the driver is low but the pad
+            // is powered. Lever-driven pads are suspect when the netlist says
+            // the input is low but the pad is powered anyway - a lever that is
+            // off drives nothing, so the power must come from another net.
+            let drv = lay.gate_cells.get(&op).map(|(o, _)| f.dust_at(*o));
+            let suspect = f.dust_at(fd) > 0
+                && !truth[op as usize]
+                && drv.is_none_or(|d| d == 0);
+            if !suspect {
                 continue;
             }
+            suspects += 1;
             // Which signal is this pad *supposed* to carry? If the operand is a
             // NOR gate then a wire arriving from a lever net is a short; if it
             // is an input, the lever is the legitimate driver and the fault is
             // elsewhere.
             println!(
-                "\npad {fd:?} of gate {sig} reads {} but its driver outputs {drv}\n  operand {op} is {:?}, netlist value {}",
+                "\npad {fd:?} of gate {sig} reads {} but its driver outputs {drv:?}\n  operand {op} is {:?}, netlist value {}",
                 f.dust_at(fd),
                 net.src(op),
                 truth[op as usize]
@@ -115,7 +131,11 @@ fn main() {
             let mut cur = fd;
             for _ in 0..200 {
                 let lv = f.dust_at(cur);
-                println!("  {cur:?} level {lv} {:?}", lay.grid.get(cur));
+                println!(
+                    "  {cur:?} level {lv} {:?} owner={:?}",
+                    lay.grid.get(cur),
+                    lay.wire_owner.get(&cur)
+                );
                 let mut nxt = None;
                 for d in ohmc::world::Dir::ALL {
                     let n = ohmc::world::offset(cur, d);
@@ -142,12 +162,36 @@ fn main() {
                 }
                 match nxt {
                     Some(x) => cur = x,
-                    None => break,
+                    None => {
+                        // A walk that ends on full-strength dust with no dust,
+                        // torch, repeater or lever found is being fed by a
+                        // strongly powered *block* - the one case the per-cell
+                        // scan above cannot see. Dump the neighbourhood.
+                        if lv == 15 {
+                            println!("    terminus at full strength; neighbourhood:");
+                            for dy in -1..=1i32 {
+                                for dz in -1..=1i32 {
+                                    for dx in -1..=1i32 {
+                                        let c = (cur.0 + dx, cur.1 + dy, cur.2 + dz);
+                                        let b = lay.grid.get(c);
+                                        if !matches!(b, ohmc::world::Block::Air) {
+                                            println!(
+                                                "      {c:?} {b:?} owner={:?} strong={}",
+                                                lay.wire_owner.get(&c),
+                                                f.block_strong(c)
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        break;
+                    }
                 }
             }
             break;
         }
     }
 
-    println!("\n{wrong} gate(s) disagree with the netlist");
+    println!("\n{wrong} gate(s) disagree with the netlist, {suspects} suspect pad(s) traced");
 }
