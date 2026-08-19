@@ -84,6 +84,34 @@
 //! The harnesses now write `pause-when-empty-seconds=-1`. Nothing in this
 //! module needed to change; the model was right about all of it.
 //!
+//! # setblock does not flip a lever the way a player does
+//!
+//! Replacing `lever[powered=true]` with `lever[powered=false]` via `setblock`
+//! is a **same-block-type** replacement, so Minecraft skips `onRemove` and
+//! notifies only the lever's direct neighbours. A real lever flip also updates
+//! the neighbours of the block the lever is *attached to*, and a routed wire is
+//! frequently adjacent to that support rather than to the lever itself - the
+//! support is strongly powered while the lever is on, which is a legitimate and
+//! useful way to enter a net at full strength. Those cells never hear the lever
+//! turn off, and hold a stale 15 indefinitely.
+//!
+//! This produced a textbook false failure. `add2` in game read sum+1 on every
+//! even input while all seventeen of its gate torches measured *correct*
+//! against the netlist at every stage, and the block simulator - which
+//! recomputes the whole field each tick and so cannot represent a missed update
+//! - insisted the circuit was perfect. The giveaway was a power level that
+//! *rose* along plain dust, 14 then 15, which no wire can do: the 15 was not
+//! coming down the wire at all, it was the lever's support block, still stuck
+//! on.
+//!
+//! The harnesses clear the lever cell to air before placing it in the wanted
+//! state. Air-to-lever and lever-to-air both change block type, so the support
+//! gets its update.
+//!
+//! Worth noting for any future harness: this had been latent for the whole
+//! project. It only surfaced once the router fixes moved a wire from beside the
+//! lever to beside its support.
+//!
 //! # Repeater orientation is verified against the game
 //!
 //! A repeater's output is `opposite(facing)`: `facing=North` drives the +Z end.

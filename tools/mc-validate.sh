@@ -188,6 +188,21 @@ run_case() {
     local was
     was=$(echo "$CUR" | awk -v i=$((b+1)) '{print $i}')
     if [ "$was" != "$st" ]; then
+      # Clear to air first, then place the lever in the wanted state.
+      #
+      # setblock from lever[powered=true] straight to lever[powered=false] is a
+      # same-block-type replacement, so Minecraft skips onRemove and only
+      # notifies the lever's direct neighbours. A real lever flip also updates
+      # the neighbours of the block the lever is *attached to* - and a gate's
+      # wire is often adjacent to that support rather than to the lever itself.
+      # Without the air step those cells never hear the lever turn off and hold
+      # a stale 15 forever.
+      #
+      # That is exactly what made add2 read sum+1 on the even inputs in game
+      # while every one of its seventeen gate torches measured correct, and
+      # while the simulator - which recomputes the whole field each tick and so
+      # has no notion of a missed update - said the circuit was perfect.
+      send "setblock $x $y $z minecraft:air" 0
       send "setblock $x $y $z minecraft:lever[face=floor,facing=north,powered=$st]" 0
     fi
     next="$next $st"
