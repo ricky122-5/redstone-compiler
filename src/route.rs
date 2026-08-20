@@ -264,7 +264,19 @@ impl Router {
                 return false;
             }
         }
-        true
+        // The signal has to be able to leave. A site whose own three cells are
+        // clear can still be walled in just past its output, and the next stage
+        // then fails with nowhere to start - the router reports zero open exits
+        // at the source. Insist on somewhere to go before committing the relay.
+        let exits = Dir::ALL
+            .iter()
+            .flat_map(|&d| {
+                let n = offset(out, d);
+                [n, up(n), down(n)]
+            })
+            .filter(|&c| c != pos && self.placeable(grid, c, net))
+            .count();
+        exits >= 2
     }
 
     /// Remove everything `net` routed, freeing the space for someone else.

@@ -48,6 +48,11 @@ const SPINE_LEN: i32 = 5;
 /// physics alone, and the only paths that exist switch back over themselves and
 /// break the slope. Anything deeper gets broken into relay stages.
 const MAX_DROP: i32 = 12;
+/// How many Z bands relays are spread over before wrapping.
+const RELAY_BANDS: i32 = 6;
+/// Z between adjacent relay bands.
+const RELAY_BAND_GAP: i32 = 10;
+
 /// Z of the first relay stage, south of every gate spine.
 const RISER_Z0: i32 = 14;
 /// Z advance per relay stage. Must exceed MAX_DROP so each stage can descend
@@ -478,7 +483,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     // its own allocator: two gates at the same X on different levels would
     // otherwise stack their chains on top of each other.
     let mut riser_slot: HashMap<i32, i32> = HashMap::new();
-    let stage_band = max_stages * RISER_PITCH + 8;
+    let _ = max_stages;
 
     // Route every fan-in connection, hardest first.
     //
@@ -542,6 +547,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
 
         let mut from: Vec<Pos> = sources.clone();
         let mut carry = decay;
+        let mut stage_err: Option<String> = None;
         // Relay chains step from the driver toward the sink, so every hop is
         // short in X as well as Y. Parking the whole chain at either end just
         // moves the long hop to the other side: with it at the destination the
@@ -550,13 +556,23 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         let chain_x: Vec<i32> = (1..stages)
             .map(|s| src_x + (feed.0 - src_x) * s / stages)
             .collect();
-        // A Z band per chain, since two chains can share a column.
+        // Chains are separated by *where they already are*, not by handing each
+        // one its own Z band.
+        //
+        // Successive stages of one chain differ in X and Y because both are
+        // interpolated from source to sink, and two different chains only
+        // collide if they share both. The old allocator gave every chain a band
+        // and marched it further in Z each stage, so the strip's depth grew
+        // with the design: alu's first chain started at z=437, and its final
+        // hop then had to cross the whole excursion. A small per-chain jitter
+        // breaks the remaining ties, and `relay_site_clear` moves anything that
+        // still lands on a neighbour.
         let slot = if stages > 1 {
             let key = *chain_x.first().unwrap_or(&feed.0);
             let s = riser_slot.entry(key).or_insert(0);
             let v = *s;
             *s += 1;
-            v
+            v % 4
         } else {
             0
         };
@@ -570,16 +586,30 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             // Inputs of one gate are two columns apart, so their chains are
             // separated in Z instead, keeping them clear of each other's keepout.
             let rx = chain_x[(stage - 1) as usize];
-            let rz = RISER_Z0 + slot * stage_band + (stage - 1) * RISER_PITCH;
             let ry = top - stage * (drop / stages);
+            // Z band by the level the relay lands on.
+            //
+            // A chain descends through levels, so its stages land on different
+            // ones and separate in Z for free; two chains on the same level
+            // separate in X, which is interpolated toward their own sinks. That
+            // gives every stage room without handing each chain a private band
+            // whose depth grows with the design - the old scheme put alu's
+            // first chain at z=437 and left its final hop crossing the whole
+            // excursion. Bands wrap, so Z stays bounded however deep the design.
+            let band = (-ry).div_euclid(LEVEL_H).rem_euclid(RELAY_BANDS);
+            let rz = RISER_Z0 + band * RELAY_BAND_GAP + (slot % 2) * 4;
             // stamp_relay writes with grid.set and never consults keepout, so
             // the site has to be checked here or the relay can land touching
             // another net's wire - which electrically joins the two nets and is
             // exactly what made add.ohm compute wrong answers while passing
             // every audit that only looked at routed cells. Probe candidates
             // near the nominal site and take the first clear one.
-            let site = (0..8)
-                .flat_map(|dz| [0, 1, -1, 2, -2].map(|dx| (rx + dx, ry, rz + dz)))
+            // Search widely: chains no longer reserve their own Z, so a site
+            // genuinely has to be found rather than assumed.
+            let site = (0..48)
+                .flat_map(|dz| {
+                    [0, 2, -2, 4, -4, 6, -6, 9, -9, 12, -12].map(|dx| (rx + dx, ry, rz + dz))
+                })
                 .find(|&c| router.relay_site_clear(&grid, c, src))
                 .ok_or_else(|| {
                     format!(
@@ -590,13 +620,48 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             router.claim(rin, src);
             router.claim(rout, src);
             router.block(site);
-            router
-                .route(&mut grid, src, &from, rin, bounds, Material::Wire, carry)
-                .map_err(|e| {
-                    format!("relay stage {stage} for net {src} into gate {g} input {j}: {e}")
-                })?;
+            if let Err(e) = router.route(&mut grid, src, &from, rin, bounds, Material::Wire, carry)
+            {
+                stage_err = Some(format!(
+                    "relay stage {stage} for net {src} into gate {g} input {j}: {e}"
+                ));
+                break;
+            }
             from = vec![rout];
             carry = 0;
+        }
+        // A relay hop can fail for the same reason the final one can: a site
+        // that had room when it was chosen is walled in by the time the next
+        // stage routes to it. Rip-up covered only the last hop, so those
+        // failures were fatal even though the space was recoverable.
+        if let Some(e) = stage_err {
+            let tries = rips.entry((g, j)).or_insert(0);
+            *tries += 1;
+            if *tries > 6 {
+                return Err(format!("{e}\nnote: {routed} of {total_conns} routed"));
+            }
+            // Look at both ends. A connection stalls just as often because its
+            // own driver is boxed in - the router reports three open exits at a
+            // gate's output spine - as because the destination is, and ripping
+            // only around the target leaves that untouched.
+            let mut victims = router.crowders(feed, 24, src);
+            for v in router.crowders(sources[0], 20, src) {
+                if !victims.contains(&v) {
+                    victims.push(v);
+                }
+            }
+            if victims.is_empty() {
+                return Err(format!("{e}\nnote: {routed} of {total_conns} routed"));
+            }
+            for v in victims.into_iter().take(4) {
+                router.rip(&mut grid, v);
+                let (again, keep): (Vec<_>, Vec<_>) = done.iter().partition(|&&(_, _, s)| s == v);
+                done = keep;
+                routed -= again.len();
+                queue.extend(again);
+            }
+            queue.push_front((g, j, src));
+            continue;
         }
         match router.route(&mut grid, src, &from, feed, bounds, Material::Wire, carry) {
             Ok(()) => {
@@ -616,7 +681,12 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                 }
                 // Rip the nearest few nets crowding the target and try again.
                 // Their connections go back on the queue to be redone.
-                let victims = router.crowders(feed, 24, src);
+                let mut victims = router.crowders(feed, 24, src);
+                for v in router.crowders(sources[0], 20, src) {
+                    if !victims.contains(&v) {
+                        victims.push(v);
+                    }
+                }
                 let mut freed = 0;
                 for v in victims.into_iter().take(3) {
                     router.rip(&mut grid, v);

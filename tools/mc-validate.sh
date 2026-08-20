@@ -152,7 +152,21 @@ done
 grep -q 'Done (' server.log || { echo "server timeout"; tail -20 server.log; exit 1; }
 
 send() { echo "$1" >&3; sleep "${2:-1}"; }
-send "forceload add -48 -48 96 96" 2
+# Force-load the region the circuit actually occupies.
+#
+# This used to be hardcoded to a 144-block square. `add` is 187x189 in X and Z,
+# so most of it sat in unticked chunks - where commands still place blocks and
+# probes still read them, but redstone never runs. The adder read a fixed wrong
+# answer on every sampled input, consistently across both passes, with all
+# sixteen levers verified correct.
+#
+# forceload caps at 256 chunks, so check rather than assume: a silent failure
+# here looks exactly like a compiler bug.
+FL_X2=$((BX + 16)); FL_Z2=$((BZ + 16))
+FL_CHUNKS=$(( ((FL_X2 + 48) / 16 + 1) * ((FL_Z2 + 48) / 16 + 1) ))
+echo "forceload -48 -48 $FL_X2 $FL_Z2 (~$FL_CHUNKS chunks)"
+[ "$FL_CHUNKS" -le 256 ] || { echo "circuit needs $FL_CHUNKS chunks, over the 256 forceload cap"; exit 1; }
+send "forceload add -48 -48 $FL_X2 $FL_Z2" 2
 send "reload" 3
 send "execute positioned 0.0 0.0 0.0 run function ohm:circuit" 3
 
