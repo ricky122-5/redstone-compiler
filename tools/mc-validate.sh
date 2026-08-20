@@ -62,7 +62,16 @@ LEVERS=$(echo "$INFO" | sed -n 's/.*lever at ~\([0-9-]*\) ~\([0-9-]*\) ~\([0-9-]
 LAMPS=$(echo "$INFO"  | sed -n 's/.*lamp  at ~\([0-9-]*\) ~\([0-9-]*\) ~\([0-9-]*\).*/\1 \2 \3/p')
 NLEV=$(echo "$LEVERS" | grep -c .)
 [ "$NLEV" -gt 0 ] || { echo "no input levers reported"; exit 1; }
-[ "$NLEV" -le 6 ] || { echo "$NLEV inputs is too many to sweep in-game"; exit 1; }
+# Designs wider than a handful of inputs are sampled rather than enumerated.
+#
+# The old cap of six refused anything larger outright, which meant the largest
+# design that had ever been checked on hardware was a 51-gate adder. `add` is
+# 195 gates and sixteen levers - 65536 combinations - and was never validated in
+# game at all, so three router bugs that made it compute wrong answers went
+# unnoticed until a sampled sweep in the simulator found them. Sampling a
+# stride through the space visits pairs of cases that differ in many bits,
+# which is where those bugs showed.
+MAXCASES=${OHMC_MAXCASES:-24}
 
 # --- server ----------------------------------------------------------------
 cd "$D"
@@ -164,7 +173,18 @@ send "execute positioned 0.0 0.0 0.0 run function ohm:circuit" 3
 # one is reached from a different predecessor. A combinational circuit must give
 # the same answer regardless of what it computed before; anything that passes
 # ascending and fails descending is holding state it should not.
-CASES=$((1 << NLEV))
+FULL=$((1 << NLEV))
+if [ "$FULL" -le "$MAXCASES" ]; then
+  CASE_LIST=$(seq 0 $((FULL-1)))
+else
+  # A stride, plus a small offset per step so successive cases differ widely.
+  CASE_LIST=$(python3 -c "
+full=$FULL; n=$MAXCASES
+stride=full//n
+print('\n'.join(str((i*stride+i)%full) for i in range(n)))")
+fi
+CASES=$(echo "$CASE_LIST" | grep -c .)
+echo "sweeping $CASES of $FULL input combination(s), each way"
 
 # Only touch levers whose value actually changes.
 #
@@ -214,8 +234,8 @@ run_case() {
   send "function ohm:probe" 2
 }
 
-for v in $(seq 0 $((CASES-1))); do run_case 1 "$v"; done
-for v in $(seq $((CASES-1)) -1 0); do run_case 2 "$v"; done
+for v in $CASE_LIST; do run_case 1 "$v"; done
+for v in $(echo "$CASE_LIST" | tail -r); do run_case 2 "$v"; done
 
 send "stop" 2
 wait $SRV 2>/dev/null
@@ -249,8 +269,9 @@ def read(pass_no, v):
     bits = observed.get((pass_no, v), {})
     return sum(bits.get(i, 0) << i for i in range(nlamp))
 
+sampled = {int(x) for x in """$CASE_LIST""".split()}
 fails = hysteresis = 0
-for v in sorted(expected):
+for v in sorted(k for k in expected if k in sampled):
     exp_val = int(re.search(r"=(\d+)", expected[v]).group(1))
     g1, g2 = read(1, v), read(2, v)
     # Did the harness actually drive the inputs it meant to?
@@ -274,6 +295,7 @@ print()
 if hysteresis:
     print(f"{hysteresis} case(s) answered differently on the second pass")
 print("FAIL: %d case(s) disagree" % fails if fails else
-      "PASS: Minecraft agrees with the compiler on all %d cases, both passes" % len(expected))
+      "PASS: Minecraft agrees with the compiler on all %d sampled cases, both passes"
+      % len(sampled))
 sys.exit(1 if fails else 0)
 PYEOF
