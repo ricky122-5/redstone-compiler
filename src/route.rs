@@ -267,6 +267,49 @@ impl Router {
         true
     }
 
+    /// Remove everything `net` routed, freeing the space for someone else.
+    ///
+    /// Endpoints stay: gate outputs, feed stubs and relay ends are structure,
+    /// not routing, and the connection will want them again when it is redone.
+    /// Returns the cells released.
+    pub fn rip(&mut self, grid: &mut Grid, net: NetId) -> Vec<Pos> {
+        let doomed: Vec<Pos> = self
+            .owner
+            .iter()
+            .filter(|(p, &o)| o == net && !self.claimed.contains(p))
+            .map(|(&p, _)| p)
+            .collect();
+        for &p in &doomed {
+            self.owner.remove(&p);
+            grid.clear(p);
+            self.blocked.remove(&p);
+        }
+        doomed
+    }
+
+    /// Nets with wire within `r` of `p`, nearest first. These are the ones
+    /// worth ripping when a route cannot reach `p`.
+    pub fn crowders(&self, p: Pos, r: i32, exclude: NetId) -> Vec<NetId> {
+        let mut by_dist: Vec<(i32, NetId)> = Vec::new();
+        for (&c, &o) in &self.owner {
+            if o == exclude || o == PREPLACED {
+                continue;
+            }
+            let d = (c.0 - p.0).abs() + (c.1 - p.1).abs() + (c.2 - p.2).abs();
+            if d <= r {
+                by_dist.push((d, o));
+            }
+        }
+        by_dist.sort();
+        let mut out = Vec::new();
+        for (_, n) in by_dist {
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+        out
+    }
+
     pub fn block(&mut self, p: Pos) {
         self.blocked.insert(p);
     }

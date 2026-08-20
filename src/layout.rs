@@ -508,7 +508,22 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
 
     let total_conns = work.len();
     let mut routed = 0usize;
-    for &(g, j, src, _) in &work {
+    // A queue rather than a plain iteration, so a connection that cannot reach
+    // its feed can rip up whatever is in the way and put those connections back
+    // to be done again.
+    //
+    // Without it routing is first-come-first-served: an early net takes the
+    // space and a later one - often the one that had far fewer options to begin
+    // with - simply has nowhere to go. The failure looks like a search budget
+    // problem and is not; raising the budget from 250k to 900k on `alu` changed
+    // nothing, because the target genuinely had no open approach left.
+    let mut queue: std::collections::VecDeque<(Sig, usize, Sig)> =
+        work.iter().map(|&(g, j, src, _)| (g, j, src)).collect();
+    // Rips per connection, so two that keep evicting each other give up rather
+    // than trade the same space forever.
+    let mut rips: HashMap<(Sig, usize), u32> = HashMap::new();
+    let mut done: Vec<(Sig, usize, Sig)> = Vec::new();
+    while let Some((g, j, src)) = queue.pop_front() {
         let feed = stub_entry[&(g, j)];
         let sources = spine
             .get(&src)
@@ -580,15 +595,45 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             from = vec![rout];
             carry = 0;
         }
-        router
-            .route(&mut grid, src, &from, feed, bounds, Material::Wire, carry)
-            .map_err(|e| {
-                format!(
-                    "routing net {src} into gate {g} input {j}: {e}\n\
-                     note: {routed} of {total_conns} connections routed before this one failed"
-                )
-            })?;
-        routed += 1;
+        match router.route(&mut grid, src, &from, feed, bounds, Material::Wire, carry) {
+            Ok(()) => {
+                routed += 1;
+                done.push((g, j, src));
+            }
+            Err(e) => {
+                let tries = rips.entry((g, j)).or_insert(0);
+                *tries += 1;
+                if *tries > 6 {
+                    return Err(format!(
+                        "routing net {src} into gate {g} input {j}: {e}\n\
+                         note: {routed} of {total_conns} connections routed, and ripping \
+                         up the neighbours {} times did not free a path",
+                        *tries - 1
+                    ));
+                }
+                // Rip the nearest few nets crowding the target and try again.
+                // Their connections go back on the queue to be redone.
+                let victims = router.crowders(feed, 24, src);
+                let mut freed = 0;
+                for v in victims.into_iter().take(3) {
+                    router.rip(&mut grid, v);
+                    freed += 1;
+                    let (again, keep): (Vec<_>, Vec<_>) =
+                        done.iter().partition(|&&(_, _, s)| s == v);
+                    done = keep;
+                    routed -= again.len();
+                    queue.extend(again);
+                }
+                if freed == 0 {
+                    return Err(format!(
+                        "routing net {src} into gate {g} input {j}: {e}\n\
+                         note: {routed} of {total_conns} connections routed, and nothing \
+                         was near enough to rip up"
+                    ));
+                }
+                queue.push_front((g, j, src));
+            }
+        }
     }
 
     // Outputs: route each bit out to the lamp reserved for it.

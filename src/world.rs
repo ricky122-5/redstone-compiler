@@ -276,6 +276,12 @@ impl Grid {
         self.cells.insert(p, b);
     }
 
+    /// Remove whatever is at `p`. Used when a route is ripped up so its space
+    /// can be given to a connection that could not otherwise reach.
+    pub fn clear(&mut self, p: Pos) {
+        self.cells.remove(&p);
+    }
+
     pub fn is_free(&self, p: Pos) -> bool {
         !self.cells.contains_key(&p) || self.cells[&p] == Block::Air
     }
