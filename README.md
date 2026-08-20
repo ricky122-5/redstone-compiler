@@ -18,6 +18,20 @@ source .ohm
   → Sponge v3 schematic
 ```
 
+## Verified in unmodified Minecraft
+
+| design | gates | inputs | in-game result |
+|---|---|---|---|
+| `invert.ohm` | 20 | 1 | all cases, both sweep directions |
+| `andgate.ohm` | 23 | 2 | all cases, both sweep directions |
+| `add2.ohm` | 51 | 4 | all 16 cases, both sweep directions |
+| `add.ohm` | 195 | 16 | 10 sampled of 65536, both directions, exact |
+
+`add.ohm` is 24652 blocks. Designs wider than a few inputs are sampled rather
+than enumerated - `OHMC_MAXCASES` sets how many - and every sweep is run twice,
+ascending then descending, because a circuit that answers differently the second
+time is holding state a combinational design must not have.
+
 ## Quick start
 
 ```sh
