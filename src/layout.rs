@@ -287,7 +287,10 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             let q_sig = net
                 .dff_q(i as u32)
                 .ok_or_else(|| format!("flip-flop {i} has no Q signal"))?;
-            source_of.insert(q_sig, bank_flops[i].q);
+            // The boundary port, not the raw Q. Routing out of the macro body
+            // leaves the search four open exits and it never escapes; from the
+            // port it has thirty-nine.
+            source_of.insert(q_sig, bank_flops[i].q_port);
         }
     }
 
@@ -1014,15 +1017,28 @@ mod tests {
     /// distributed to it, and Q wired back as a source the combinational cone
     /// reads.
     ///
-    /// Ignored because the last step does not work yet. The bank places, the
-    /// control levers are built and Q is registered as a source, but routing Q
-    /// into the logic fails with "no route" - the search exhausts the space
-    /// rather than running out of budget, so the flop's Q cannot reach a gate
-    /// input past the bank's own structures. Moving the bank from beyond the
-    /// riser field into negative Z, and offsetting by where Q actually sits
-    /// rather than by the tiling pitch, took the span from 255 to 77; closing
-    /// the rest needs Q to use the relay chains the placer already builds for
-    /// long lever runs, instead of one direct maze route.
+    /// Still ignored, but the remaining obstacle is now precisely one thing.
+    ///
+    /// The bank places, the control levers are built, and Q leaves its macro
+    /// freely: giving the flip-flop a boundary port took the router from four
+    /// open exits at the source to thirty-nine. What is left is reach. Q's run
+    /// to the logic is an 82-block span with an 11-block drop, and the placer
+    /// only breaks a connection over relays when the *vertical* drop is large,
+    /// so this one is attempted as a single A* shot and the search exhausts the
+    /// space.
+    ///
+    /// Staging on horizontal distance is the obvious fix and it is not a free
+    /// one: every threshold tried either leaves this connection unstaged or
+    /// starts staging connections in `add` that did not need it, and those
+    /// extra relays crowd the shared riser field until `add` cannot place at
+    /// all. The two designs are trading the same scarce space.
+    ///
+    /// That is the real limit, and it is also why `alu` does not place: relay
+    /// chains all live in one riser field whose Z bands are allocated per
+    /// chain, so the field's depth grows with the design and the chains march
+    /// away from the logic they serve. Fixing it properly means giving relays a
+    /// floorplan of their own rather than a shared strip - not another
+    /// constant.
     #[test]
     #[ignore = "register bank places, but Q cannot yet be routed into the logic"]
     fn sequential_netlists_place() {

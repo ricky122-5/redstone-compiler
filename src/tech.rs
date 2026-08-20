@@ -1028,7 +1028,13 @@ pub fn stamp_out_spine_dir(
 /// external ones, so both the simulator and the in-game harness can probe
 /// inside. (The simulator used to ring on this circuit and be useless for
 /// debugging it; that was a missing burnout rule, not the circuit.)
+/// How far Q's boundary run extends past the macro before its repeater.
+const Q_PORT_LEN: i32 = 5;
+
 pub struct DffPorts {
+    /// Q brought out to the macro's south edge, ending on a repeater so it
+    /// leaves at full strength. Route from this, not from `q`.
+    pub q_port: Pos,
     pub d_feeds: Vec<Pos>,
     /// Master enable: transparent while this is high.
     pub clk_feeds: Vec<Pos>,
@@ -1111,7 +1117,59 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
         .route(g, 11, &[m_q], s_d, bounds, Material::Gate, 0)
         .map_err(|e| format!("dff master->slave: {e}"))?;
 
+    // Bring Q out to the macro's edge.
+    //
+    // Every input already leaves through a boundary port; the output did not,
+    // and the placer paid for it. A caller routing from the raw `s_q` starts
+    // inside the slave's body with almost nowhere to go - the router reports
+    // four open exits - so a register bank's Q could never reach the logic and
+    // no sequential design would place at all. This is the same fix the inputs
+    // got, on the side that was missed.
+    //
+    // The run leaves south past the end of the macro, where nothing else is
+    // built, and ends on a repeater so the caller starts from a fresh 15
+    // regardless of how far Q had to travel inside.
+    let q_port = {
+        // Which way out is clear depends on where the slave landed, so try each
+        // axis rather than assuming. The run needs its own cells and their
+        // substrate free for the whole length.
+        let dirs: [(i32, i32, Dir); 4] = [
+            (0, 1, Dir::North),
+            (0, -1, Dir::South),
+            (1, 0, Dir::West),
+            (-1, 0, Dir::East),
+        ];
+        let mut chosen = None;
+        for (dx, dz, facing) in dirs {
+            let clear = (1..=Q_PORT_LEN).all(|k| {
+                let p = (s_q.0 + dx * k, s_q.1, s_q.2 + dz * k);
+                g.is_free(p) && (g.is_free((p.0, p.1 - 1, p.2)) || g.get((p.0, p.1 - 1, p.2)).is_opaque())
+            });
+            if clear {
+                chosen = Some((dx, dz, facing));
+                break;
+            }
+        }
+        let (dx, dz, facing) = chosen.ok_or_else(|| {
+            format!("no clear direction for the flip-flop's Q port at {s_q:?}")
+        })?;
+        let mut p = s_q;
+        for k in 1..=Q_PORT_LEN {
+            p = (s_q.0 + dx * k, s_q.1, s_q.2 + dz * k);
+            if g.is_free((p.0, p.1 - 1, p.2)) {
+                g.set((p.0, p.1 - 1, p.2), Block::Solid(Material::Gate))?;
+            }
+            if k == Q_PORT_LEN - 1 {
+                g.set(p, Block::Repeater { facing, delay: 1, powered: false })?;
+            } else {
+                g.set(p, Block::Dust { power: 0 })?;
+            }
+        }
+        p
+    };
+
     Ok(DffPorts {
+        q_port,
         d_feeds: vec![m_d],
         clk_feeds: vec![m_en],
         clk_n_feeds: vec![s_en],
