@@ -39,6 +39,8 @@ const STUB_LEN: i32 = 4;
 /// its torch, which congests immediately; a spine gives branches several places
 /// to leave from.
 const SPINE_LEN: i32 = 5;
+/// Longest an output spine may grow for a high-fanout net.
+const SPINE_MAX: i32 = 24;
 /// Largest vertical drop a single route may attempt.
 ///
 /// Dust falls one block of Y per block of horizontal travel, and it cannot carry
@@ -395,10 +397,26 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     let mut drivers: Vec<(Sig, Pos)> = placed.iter().map(|(&s, p)| (s, p.cell.out)).collect();
     drivers.extend(source_of.iter().map(|(&s, &p)| (s, p)));
     drivers.sort();
+    // How many connections each signal has to serve. A spine is the only place
+    // a branch may leave from, so a net with eight consumers needs more of it
+    // than one with two - and when it runs out, every later branch reports zero
+    // open exits at the source and the connection simply cannot start. That is
+    // the wall `alu` hits: one high-fanout net whose spine is surrounded by the
+    // consumers that already left.
+    let mut fanout: HashMap<Sig, usize> = HashMap::new();
+    for &g in &gates {
+        for &src in net.operands(g) {
+            *fanout.entry(src).or_default() += 1;
+        }
+    }
     for (s, out) in drivers {
         let mut cells = vec![out];
         router.claim(out, s);
-        for t in 1..=SPINE_LEN {
+        // Two spine cells per consumer, since a branch leaving one cell takes
+        // the room beside it too, clamped so a huge fanout cannot run across
+        // the whole floorplan.
+        let want = (fanout.get(&s).copied().unwrap_or(1) as i32 * 2).clamp(SPINE_LEN, SPINE_MAX);
+        for t in 1..=want {
             let p = (out.0, out.1, out.2 + t);
             if !grid.is_free(p) || !grid.is_free((p.0, p.1 - 1, p.2)) {
                 break;
