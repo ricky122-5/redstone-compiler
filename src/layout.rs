@@ -50,6 +50,10 @@ const SPINE_MAX: i32 = 24;
 /// physics alone, and the only paths that exist switch back over themselves and
 /// break the slope. Anything deeper gets broken into relay stages.
 const MAX_DROP: i32 = 12;
+/// How far one routed hop may reach horizontally before the connection is
+/// broken over another relay.
+const MAX_HOP: i32 = 48;
+
 /// How many Z bands relays are spread over before wrapping.
 const RELAY_BANDS: i32 = 6;
 /// Z between adjacent relay bands.
@@ -354,10 +358,29 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     let total_conns: i32 = gates.iter().map(|&g| net.operands(g).len() as i32).sum();
     let span = (widest + 8 + 3 * total_conns.max(1)).max(32);
     let depth = (gates.len() as i32).max(8) * 2 + 24 + RISER_Z0 + max_stages * RISER_PITCH;
-    let bounds = (
-        (-8, -(max_level + 1) * LEVEL_H - 8, GATE_Z - depth),
-        (span, lever_y + 4, GATE_Z + depth),
-    );
+    // Bounds must cover everything already placed, not just the gate array.
+    //
+    // They used to be derived from the gate array's own width and depth. A
+    // register bank breaks that: a flip-flop macro is 66 blocks wide, so a
+    // bank's Q sits at x=66 while a small design's gate array is only a few
+    // wide - the source was outside the region the router was allowed to
+    // search, and every sequential placement failed with "no route" on an
+    // almost empty grid.
+    let bounds = {
+        let (lo, hi) = grid.bounds().unwrap_or(((0, 0, 0), (0, 0, 0)));
+        (
+            (
+                (-8).min(lo.0 - 8),
+                (-(max_level + 1) * LEVEL_H - 8).min(lo.1 - 8),
+                (GATE_Z - depth).min(lo.2 - 8),
+            ),
+            (
+                span.max(hi.0 + 8),
+                (lever_y + 4).max(hi.1 + 8),
+                (GATE_Z + depth).max(hi.2 + 8),
+            ),
+        )
+    };
 
     // Lamps are stamped before the router exists so their blocks are reserved.
     // Otherwise a route lays substrate straight through where a lamp will go.
@@ -561,7 +584,18 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         // Break a deep drop into stages, each landing on a relay.
         let top = sources[0].1;
         let drop = top - feed.1;
-        let stages = if drop > MAX_DROP { (drop + MAX_DROP - 1) / MAX_DROP } else { 1 };
+        // Stage on horizontal reach as well as vertical drop.
+        //
+        // Keying only on drop leaves a connection that is long but shallow to
+        // be routed in one A* shot, and the search - direction-aware, with turn
+        // penalties - exhausts its budget rather than arriving. A register
+        // bank's Q is exactly that shape: the flip-flop macro is 66 wide and Q
+        // exits at its far side, so the run to the logic is 66 blocks of X with
+        // a 5-block drop, and no sequential design could place at all.
+        let span_x = (feed.0 - sources[0].0).abs();
+        let vstages = if drop > MAX_DROP { (drop + MAX_DROP - 1) / MAX_DROP } else { 1 };
+        let hstages = if span_x > MAX_HOP { (span_x + MAX_HOP - 1) / MAX_HOP } else { 1 };
+        let stages = vstages.max(hstages);
 
         let mut from: Vec<Pos> = sources.clone();
         let mut carry = decay;
@@ -614,7 +648,14 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             // whose depth grows with the design - the old scheme put alu's
             // first chain at z=437 and left its final hop crossing the whole
             // excursion. Bands wrap, so Z stays bounded however deep the design.
-            let band = (-ry).div_euclid(LEVEL_H).rem_euclid(RELAY_BANDS);
+            // Band by stage index, wrapping. Deriving the band from the relay's
+            // own Y assumed every chain descends deep into the gate array; a
+            // shallow connection near the top gives a negative level, which
+            // wrapped to the far band and banished the relay 70 blocks away in
+            // Z from both of its endpoints. The stage index is always small and
+            // positive, still gives successive stages their own Z, and wraps so
+            // the excursion stays bounded however long the chain.
+            let band = (stage - 1).rem_euclid(RELAY_BANDS);
             let rz = RISER_Z0 + band * RELAY_BAND_GAP + (slot % 2) * 4;
             // stamp_relay writes with grid.set and never consults keepout, so
             // the site has to be checked here or the relay can land touching
@@ -1105,30 +1146,14 @@ mod tests {
     /// distributed to it, and Q wired back as a source the combinational cone
     /// reads.
     ///
-    /// Still ignored, but the remaining obstacle is now precisely one thing.
+    /// The whole sequential path: a register bank, a clock and reset
+    /// distributed to it, and Q wired back as a source the combinational cone
+    /// reads.
     ///
-    /// The bank places, the control levers are built, and Q leaves its macro
-    /// freely: giving the flip-flop a boundary port took the router from four
-    /// open exits at the source to thirty-nine. What is left is reach. Q's run
-    /// to the logic is an 82-block span with an 11-block drop, and the placer
-    /// only breaks a connection over relays when the *vertical* drop is large,
-    /// so this one is attempted as a single A* shot and the search exhausts the
-    /// space.
-    ///
-    /// Staging on horizontal distance is the obvious fix and it is not a free
-    /// one: every threshold tried either leaves this connection unstaged or
-    /// starts staging connections in `add` that did not need it, and those
-    /// extra relays crowd the shared riser field until `add` cannot place at
-    /// all. The two designs are trading the same scarce space.
-    ///
-    /// That is the real limit, and it is also why `alu` does not place: relay
-    /// chains all live in one riser field whose Z bands are allocated per
-    /// chain, so the field's depth grows with the design and the chains march
-    /// away from the logic they serve. Fixing it properly means giving relays a
-    /// floorplan of their own rather than a shared strip - not another
-    /// constant.
+    /// The circuit is the smallest real one there is - a flop fed its own
+    /// inverted output - and it cannot be placed at all without treating Q as
+    /// both a source and a sink.
     #[test]
-    #[ignore = "register bank places, but Q cannot yet be routed into the logic"]
     fn sequential_netlists_place() {
         let mut net = Netlist::new();
         let (idx, q) = net.add_dff("r");
