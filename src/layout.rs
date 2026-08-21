@@ -162,13 +162,30 @@ pub struct RegisterBank {
 /// output. It is wasteful of space, which costs nothing here - the build is
 /// already sparse and Minecraft does not care - and it removes an entire class
 /// of failure that only appears at some particular register count.
-const FLOP_PITCH_X: i32 = 200;
-const FLOP_PITCH_Z: i32 = 200;
+// A flip-flop measures 68 x 141 (examples/seq_probe.rs prints it), so a 200
+// pitch wasted more than half the bank. That is not just area: bounds cover
+// everything placed, so an oversized bank is extra distance every Q has to
+// cross to reach the logic, and `tick` routed 3 of 141 connections because of
+// it. Footprint plus clearance.
+const FLOP_PITCH_X: i32 = 80;
+const FLOP_PITCH_Z: i32 = 152;
 
 /// Stamp `n` flip-flops in a bank based at `base`.
 pub fn place_register_bank(g: &mut Grid, base: Pos, n: usize) -> Result<RegisterBank, String> {
     let (bx, by, bz) = base;
     // Near-square, so neither spine has to span the whole bank.
+    // Near-square, and neither shape is good enough.
+    //
+    // Rows cost Q reach: a flip-flop is 141 deep, so the row behind the front
+    // one sits another pitch back in Z and its Q must cross all of it. Columns
+    // cost width: eleven flops in a single row is an 880-block bank feeding a
+    // 50-block gate array, and `tick` then stalls on a 388-block relay hop.
+    // Both were measured; square is the better of the two and still not enough.
+    //
+    // The real problem is upstream of the tiling. One bit of state is a 68 x
+    // 141 macro, so any bank of a useful size dwarfs the logic it serves. gcd
+    // needs 42 of them. Making that place is a cell-library problem - a smaller
+    // flip-flop - not a floorplan one.
     let cols = (n as f64).sqrt().ceil().max(1.0) as usize;
     let mut flops = Vec::with_capacity(n);
     for i in 0..n {

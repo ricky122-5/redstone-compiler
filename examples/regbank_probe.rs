@@ -63,8 +63,33 @@ fn main() {
         .chain(b.clk_feeds.iter())
         .map(|&f| drive(&mut g, f))
         .collect();
+    // Both clock phases are inputs now. This example predated that and drove
+    // only the master's phase, so the slave never opened and every register
+    // read zero - which looks exactly like a broken bank.
+    let clk_n: Vec<Pos> = a
+        .clk_n_feeds
+        .iter()
+        .chain(b.clk_n_feeds.iter())
+        .map(|&f| drive(&mut g, f))
+        .collect();
+    // And reset, since a placed circuit's state is whatever placement left.
+    let rst: Vec<Pos> = a
+        .clr_feeds
+        .iter()
+        .chain(b.clr_feeds.iter())
+        .map(|&f| drive(&mut g, f))
+        .collect();
 
     let mut sim = Sim::new(&g);
+    // Pulse reset first: placement leaves the latches wherever it leaves them.
+    for &l in &rst {
+        sim.set_lever(l, true);
+    }
+    sim.run_until_stable(20000);
+    for &l in &rst {
+        sim.set_lever(l, false);
+    }
+    sim.run_until_stable(20000);
     let apply = |sim: &mut Sim, va: bool, vb: bool, c: bool| {
         for &l in &da {
             sim.set_lever(l, va);
@@ -74,6 +99,9 @@ fn main() {
         }
         for &l in &clk {
             sim.set_lever(l, c);
+        }
+        for &l in &clk_n {
+            sim.set_lever(l, !c);
         }
         sim.run_until_stable(20000).1
     };

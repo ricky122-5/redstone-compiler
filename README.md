@@ -32,6 +32,19 @@ than enumerated - `OHMC_MAXCASES` sets how many - and every sweep is run twice,
 ascending then descending, because a circuit that answers differently the second
 time is holding state a combinational design must not have.
 
+## Sequential designs
+
+Programs with loops or branches synthesise a control FSM and real registers.
+Those place: a register bank, both clock phases and reset distributed to it, and
+each flip-flop's Q wired back as a source the combinational cone reads.
+
+The limit is size, and it sits upstream of the floorplan. One bit of state is a
+68 x 141 macro, so any bank of a useful width dwarfs the logic it serves -
+`tick.ohm` (99 gates, 11 flip-flops) stalls partway through routing whichever
+way the bank is tiled, because rows cost Q reach and columns cost width. Making
+`gcd.ohm` (724 gates, 42 flip-flops) place is a cell-library problem: a smaller
+flip-flop.
+
 ## Quick start
 
 ```sh
