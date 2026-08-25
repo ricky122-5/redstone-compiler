@@ -39,11 +39,12 @@ Those place: a register bank, both clock phases and reset distributed to it, and
 each flip-flop's Q wired back as a source the combinational cone reads.
 
 The limit is size, and it sits upstream of the floorplan. One bit of state is a
-68 x 141 macro, so any bank of a useful width dwarfs the logic it serves -
-`tick.ohm` (99 gates, 11 flip-flops) stalls partway through routing whichever
-way the bank is tiled, because rows cost Q reach and columns cost width. Making
-`gcd.ohm` (724 gates, 42 flip-flops) place is a cell-library problem: a smaller
-flip-flop.
+68 x 113 macro - down from 68 x 141, by tightening the D latch's stage pitch -
+so any bank of a useful width still dwarfs the logic it serves. `tick.ohm`
+(99 gates, 11 flip-flops) stalls partway through routing whichever way the bank
+is tiled, because rows cost Q reach and columns cost width, and the shrink was
+not enough to change that. Making `gcd.ohm` (724 gates, 42 flip-flops) place
+needs a materially smaller flip-flop, not a slightly smaller one.
 
 ## Quick start
 

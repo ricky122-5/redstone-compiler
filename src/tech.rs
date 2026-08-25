@@ -738,7 +738,11 @@ pub fn stamp_d_latch(g: &mut Grid, base: Pos) -> Result<DLatchPorts, String> {
     // a lane, cross it, and descend again. The router does that job now and packs
     // it tighter, so the old pitch is waste - and waste matters here, since gcd
     // needs 42 of these.
-    const DZ: i32 = 8;
+    // Six, not eight. Eight is load-bearing inside the RS latch, whose
+    // hand-placed feedback link has no room to descend in less, but the D
+    // latch's stages are wired by the router and it manages the tighter pitch.
+    // Depth here is what makes a register bank dwarf the logic it feeds.
+    const DZ: i32 = 6;
 
     // Gates first, then let the real router wire them.
     //
@@ -1093,7 +1097,7 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
     // routed links from the master's Q spine to the slave's D feeds. Longer
     // links, more damage - so the links are what disturb the circuit, not the
     // proximity of the two macros.
-    const GAP: i32 = 14;
+    const GAP: i32 = 10;
 
     let m = stamp_d_latch(g, (x, y, z))?;
     let (m_d, m_en, m_q, m_clr) = (m.d, m.en, m.q, m.clr);

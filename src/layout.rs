@@ -162,13 +162,13 @@ pub struct RegisterBank {
 /// output. It is wasteful of space, which costs nothing here - the build is
 /// already sparse and Minecraft does not care - and it removes an entire class
 /// of failure that only appears at some particular register count.
-// A flip-flop measures 68 x 141 (examples/seq_probe.rs prints it), so a 200
+// A flip-flop measures 68 x 113 (examples/seq_probe.rs prints it), so a 200
 // pitch wasted more than half the bank. That is not just area: bounds cover
 // everything placed, so an oversized bank is extra distance every Q has to
 // cross to reach the logic, and `tick` routed 3 of 141 connections because of
 // it. Footprint plus clearance.
 const FLOP_PITCH_X: i32 = 80;
-const FLOP_PITCH_Z: i32 = 152;
+const FLOP_PITCH_Z: i32 = 124;
 
 /// Stamp `n` flip-flops in a bank based at `base`.
 pub fn place_register_bank(g: &mut Grid, base: Pos, n: usize) -> Result<RegisterBank, String> {
