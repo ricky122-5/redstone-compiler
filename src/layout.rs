@@ -151,41 +151,33 @@ pub struct RegisterBank {
 
 /// Pitch of the register bank.
 ///
-/// This is deliberately much larger than a flip-flop's measured extent (67 x 141
-/// blocks, per `examples/flop_size.rs`). The measurement is of a macro stamped
-/// into an empty grid, and it understates the real footprint: the D latch wires
-/// itself with the maze router under bounds reaching `x + 140`, so with a
-/// neighbour in range the router will happily spill into it. Tiling at the
-/// measured extent collided registers 1 and 5.
+/// This clears the flip-flop's measured extent plus a margin, and the margin is
+/// not optional: the measurement is of a macro stamped into an empty grid, and
+/// the D latch wires itself with the maze router, so with a neighbour inside its
+/// bounds the router will spill into it. Tiling at the bare extent collided
+/// registers 1 and 5.
 ///
-/// The pitch therefore clears the internal router's *bounds*, not its typical
-/// output. It is wasteful of space, which costs nothing here - the build is
-/// already sparse and Minecraft does not care - and it removes an entire class
-/// of failure that only appears at some particular register count.
-// A flip-flop measures 68 x 113 (examples/seq_probe.rs prints it), so a 200
-// pitch wasted more than half the bank. That is not just area: bounds cover
-// everything placed, so an oversized bank is extra distance every Q has to
-// cross to reach the logic, and `tick` routed 3 of 141 connections because of
-// it. Footprint plus clearance.
-const FLOP_PITCH_X: i32 = 80;
-const FLOP_PITCH_Z: i32 = 124;
+/// The numbers track `examples/flop_size.rs`. A flip-flop was 68 x 113 and is
+/// now 35 x 55: the staircase inside the D latch was pitched for hand-placed
+/// wiring, and swept against the flip-flop's own behavioural test it tightens
+/// to a quarter of the area. That is the whole reason a sequential design can be
+/// placed at all - bounds cover everything placed, so an oversized bank is extra
+/// distance every Q has to cross to reach the logic, and `tick` routed 3 of 141
+/// connections at the old size.
+const FLOP_PITCH_X: i32 = 47;
+const FLOP_PITCH_Z: i32 = 66;
 
 /// Stamp `n` flip-flops in a bank based at `base`.
 pub fn place_register_bank(g: &mut Grid, base: Pos, n: usize) -> Result<RegisterBank, String> {
     let (bx, by, bz) = base;
     // Near-square, so neither spine has to span the whole bank.
-    // Near-square, and neither shape is good enough.
     //
-    // Rows cost Q reach: a flip-flop is 141 deep, so the row behind the front
-    // one sits another pitch back in Z and its Q must cross all of it. Columns
-    // cost width: eleven flops in a single row is an 880-block bank feeding a
-    // 50-block gate array, and `tick` then stalls on a 388-block relay hop.
-    // Both were measured; square is the better of the two and still not enough.
-    //
-    // The real problem is upstream of the tiling. One bit of state is a 68 x
-    // 141 macro, so any bank of a useful size dwarfs the logic it serves. gcd
-    // needs 42 of them. Making that place is a cell-library problem - a smaller
-    // flip-flop - not a floorplan one.
+    // Rows cost Q reach: the row behind the front one sits another pitch back in
+    // Z and its Q must cross all of it. Columns cost width: eleven flops in a
+    // single row is a bank many times wider than the gate array it feeds, and
+    // `tick` then stalls on a single enormous relay hop. Square is the better of
+    // the two, and at the old flip-flop size it was still not enough - the real
+    // fix was upstream, in how much space one bit of state takes.
     let cols = (n as f64).sqrt().ceil().max(1.0) as usize;
     let mut flops = Vec::with_capacity(n);
     for i in 0..n {

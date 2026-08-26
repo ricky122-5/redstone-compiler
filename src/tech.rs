@@ -456,13 +456,17 @@ pub fn link_via(
 pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos, Pos), String> {
     let (x, y, z) = base;
     const DZ: i32 = 8;
+    // How far B sits east of A. Six was the original hand-placed spacing; four
+    // still leaves the cross-coupled links room and is two blocks off the
+    // macro's width, which multiplies by the register count.
+    const RSW: i32 = 4;
     // Fan-in two, not one: each NOR takes the cross-coupled feedback on one
     // input and the external set/reset on the other. With a single input the
     // feedback and the external drive land on the same wire, shorted together,
     // and the latch degenerates into a follower that cannot hold anything.
     let a = stamp_nor(g, (x, y, z), 2)?;
     // B gets a third input: the asynchronous clear. See the doc comment.
-    let b = stamp_nor(g, (x + 6, y, z + DZ), 3)?;
+    let b = stamp_nor(g, (x + RSW, y, z + DZ), 3)?;
 
     // Start the loop in a state that is consistent all the way round, not just
     // at the torches.
@@ -476,7 +480,7 @@ pub fn stamp_rs_latch(g: &mut Grid, base: Pos) -> Result<(Pos, Pos, Pos, Pos, Po
     // instead of dying out. Real redstone damps it via torch burnout; a
     // deterministic simulator rings.
     g.force(
-        (x + 6, y + plane::SUPPORT, z + DZ + 1),
+        (x + RSW, y + plane::SUPPORT, z + DZ + 1),
         Block::WallTorch { facing: Dir::South, lit: false },
     );
     // A drives high, so the repeater feeding B's loop input starts powered.
@@ -742,7 +746,25 @@ pub fn stamp_d_latch(g: &mut Grid, base: Pos) -> Result<DLatchPorts, String> {
     // hand-placed feedback link has no room to descend in less, but the D
     // latch's stages are wired by the router and it manages the tighter pitch.
     // Depth here is what makes a register bank dwarf the logic it feeds.
-    const DZ: i32 = 6;
+    // The five combinational cells climb a staircase in X and Z so each stage's
+    // output is downstream of the last in both axes and the router gets a
+    // monotone path. The pitch of that staircase, and where the RS latch sits at
+    // the end of it, are what set the whole macro's footprint - the cells
+    // themselves are at most five blocks square.
+    //
+    // These were 10/6 with the latch at (55, 36), which came from hand-placed
+    // wiring and survived the move to the router untouched. Swept against the
+    // flip-flop's own behavioural test, the tightest arrangement that still
+    // captures both a 0 and a 1 is 4/3 with the latch at (24, 10), and it takes
+    // the flip-flop from 68x113 to 35x55 - a quarter of the area. Below this it
+    // stops working rather than getting slower: at a pitch of 2 the latch will
+    // not store a 1, and pulling the RS latch in to 22 walls in the R gate's
+    // feed completely (`0/12 open approaches`). So this is the floor for *this*
+    // arrangement, and it is a measured floor, not a guessed one.
+    const DX: i32 = 4;
+    const DZ: i32 = 3;
+    const RSX: i32 = 24;
+    const RSZ: i32 = 10;
 
     // Gates first, then let the real router wire them.
     //
@@ -754,11 +776,11 @@ pub fn stamp_d_latch(g: &mut Grid, base: Pos) -> Result<DLatchPorts, String> {
     // routed is the latch's feedback cycle, because levelisation needs a DAG.
     // So the cycle stays hand-placed and everything else is delegated.
     let not_e_s = stamp_nor(g, (x, y, z), 1)?;
-    let not_e_r = stamp_nor(g, (x + 10, y, z + DZ), 1)?;
-    let not_d = stamp_nor(g, (x + 20, y, z + 2 * DZ), 1)?;
-    let s_gate = stamp_nor(g, (x + 30, y, z + 3 * DZ), 2)?;
-    let r_gate = stamp_nor(g, (x + 40, y, z + 4 * DZ), 2)?;
-    let (set_feed, reset_feed, clr_feed, q, qn) = stamp_rs_latch(g, (x + 55, y, z + 6 * DZ))?;
+    let not_e_r = stamp_nor(g, (x + DX, y, z + DZ), 1)?;
+    let not_d = stamp_nor(g, (x + 2 * DX, y, z + 2 * DZ), 1)?;
+    let s_gate = stamp_nor(g, (x + 3 * DX, y, z + 3 * DZ), 2)?;
+    let r_gate = stamp_nor(g, (x + 4 * DX, y, z + 4 * DZ), 2)?;
+    let (set_feed, reset_feed, clr_feed, q, qn) = stamp_rs_latch(g, (x + RSX, y, z + RSZ))?;
 
     // At rest the enable is low, so !E is high and both S = NOR(!D,!E) and
     // R = NOR(D,!E) are low. Cells are stamped with their torch lit, which would
@@ -781,7 +803,7 @@ pub fn stamp_d_latch(g: &mut Grid, base: Pos) -> Result<DLatchPorts, String> {
     // will use whatever space it finds, so slack here multiplies by the register
     // count. At the old bounds a bank had to be pitched 200 apart, which put
     // 763 blocks between a flip-flop's Q and the logic reading it.
-    let bounds = ((x - 6, y - 20, z - 12), (x + 72, y + 26, z + 9 * DZ + 12));
+    let bounds = ((x - 6, y - 20, z - 12), (x + RSX + 17, y + 26, z + RSZ + 20));
 
     // Each wire is its own net as far as the router is concerned.
     let wire = |g: &mut Grid, r: &mut Router, net: u32, from: Pos, to: Pos| -> Result<(), String> {
@@ -847,13 +869,18 @@ pub fn stamp_d_latch(g: &mut Grid, base: Pos) -> Result<DLatchPorts, String> {
     // overwrites the bit it was told to keep. Holding D back by one more
     // repeater means the enable always closes the latch first, so the cell
     // tolerates a simultaneous change instead of corrupting on it.
+    // Pad pitch and standoff. Both were swept: neither is on the critical path
+    // for the footprint (the RS latch offset sets both extents), and pulling the
+    // standoff in below 8 breaks the macro.
+    const PADX: i32 = 9;
+    const PADZ: i32 = 8;
     let pad = |g: &mut Grid, i: i32, reps: usize| -> Result<(Pos, Pos), String> {
-        let x0 = x + i * 9;
+        let x0 = x + i * PADX;
         let y0 = not_d.feeds[0].1;
-        let entry = (x0, y0, z - 8);
+        let entry = (x0, y0, z - PADZ);
         let last = if reps == 0 { 1 } else { 2 * reps };
         for dz in 0..=last as i32 {
-            let p = (x0, y0, z - 8 + dz);
+            let p = (x0, y0, z - PADZ + dz);
             g.set((p.0, p.1 - 1, p.2), Block::Solid(Material::Gate))?;
             let b = if reps > 0 && dz % 2 == 1 {
                 Block::Repeater { facing: Dir::North, delay: 1, powered: false }
@@ -862,7 +889,7 @@ pub fn stamp_d_latch(g: &mut Grid, base: Pos) -> Result<DLatchPorts, String> {
             };
             g.set(p, b)?;
         }
-        Ok((entry, (x0, y0, z - 8 + last as i32)))
+        Ok((entry, (x0, y0, z - PADZ + last as i32)))
     };
     // Every port is refreshed, and D carries one more repeater than the enable.
     //
@@ -882,8 +909,19 @@ pub fn stamp_d_latch(g: &mut Grid, base: Pos) -> Result<DLatchPorts, String> {
     // ordering guarantee here - `d_latch_follows_then_holds` fails, because a
     // caller changing D and the enable together then overwrites the stored bit.
     // So the pads keep their refresh.
+    // Two refresh repeaters on each of D and the enable.
+    //
+    // The enable used to carry one, so that D was strictly slower and a caller
+    // changing both in the same instant could not overwrite the stored bit. That
+    // ordering came from the pad counts *plus* the routed leg lengths, and
+    // tightening the staircase shortened the legs enough to flip it: at the new
+    // pitch, one repeater on the enable let D's fall through before the latch
+    // closed, and `d_latch_follows_then_holds` caught it. Two and two restores
+    // the ordering at the new geometry. It is emergent from the leg lengths, so
+    // it is held by that test rather than by argument - if the geometry moves
+    // again, sweep these again.
     let (d_port, d_hub) = pad(g, 0, 2)?;
-    let (en_port, en_hub) = pad(g, 1, 1)?;
+    let (en_port, en_hub) = pad(g, 1, 2)?;
     let (clr_port, clr_hub) = pad(g, 2, 1)?;
 
     // One net per logical input, fanned out to every gate that needs it. Same
@@ -1097,7 +1135,13 @@ pub fn stamp_dff(g: &mut Grid, base: Pos) -> Result<DffPorts, String> {
     // routed links from the master's Q spine to the slave's D feeds. Longer
     // links, more damage - so the links are what disturb the circuit, not the
     // proximity of the two macros.
-    const GAP: i32 = 10;
+    // Four, not ten. Widening this to 60 was tried in game and made the master
+    // stop capturing, which pinned the disturbance on the *length* of the two
+    // routed links from the master's Q to the slave's D rather than on the two
+    // macros being near each other. Shortening it therefore ought to help, and
+    // the behavioural sweep agrees: at 4 the flip-flop still captures both a 0
+    // and a 1, and the macro is six blocks shallower.
+    const GAP: i32 = 4;
 
     let m = stamp_d_latch(g, (x, y, z))?;
     let (m_d, m_en, m_q, m_clr) = (m.d, m.en, m.q, m.clr);
