@@ -40,12 +40,20 @@ DEPTH=${DEPTH:-8}
 # block simulator measures ~116 ticks per cycle once halted and up to ~220 while
 # the FSM is moving; at 20 ticks a second that is a good few seconds, and too
 # short reads a half-propagated state that looks exactly like a logic bug.
-PHASE=$(( 3 + DEPTH / 2 ))
+# A clock phase must be long enough in *game ticks*, and the server does not
+# necessarily run at twenty a second: this build is 60,000 blocks across a
+# thousand ticking chunks, and it runs several times slower than real time. The
+# block simulator measures 116 ticks per cycle once halted and up to 220 while
+# the FSM is moving - six to eleven seconds at full speed, and much longer here.
+# Too short reads a half-propagated state, which looks exactly like a logic bug.
+PHASE=${OHMC_PHASE:-$(( 12 + DEPTH ))}
 echo "logic depth $DEPTH -> ${PHASE}s per clock phase, $CYCLES cycles"
 
 # Port coordinates, in the same frame as the emitted commands.
-LEVERS=$(echo "$INFO" | sed -n 's/^  port.* lever at ~\([0-9-]*\) ~\([0-9-]*\) ~\([0-9-]*\).*/\1 \2 \3/p')
-[ -n "$LEVERS" ] || LEVERS=$(echo "$INFO" | sed -n 's/.*input lever at ~\([0-9-]*\) ~\([0-9-]*\) ~\([0-9-]*\).*/\1 \2 \3/p')
+# Data levers only. The compiler prints these as "  input  port0[0] lever at
+# ...", and the control levers on their own lines - matching on "lever at"
+# alone would sweep the clock as though it were an input bit.
+LEVERS=$(echo "$INFO" | sed -n 's/^  input .* lever at ~\([0-9-]*\) ~\([0-9-]*\) ~\([0-9-]*\).*/\1 \2 \3/p')
 LAMPS=$(echo "$INFO"  | sed -n 's/.*lamp  at ~\([0-9-]*\) ~\([0-9-]*\) ~\([0-9-]*\).*/\1 \2 \3/p')
 CLK=$(echo "$INFO"    | sed -n 's/.*clock   lever at ~\([0-9-]*\) ~\([0-9-]*\) ~\([0-9-]*\).*/\1 \2 \3/p')
 CLKN=$(echo "$INFO"   | sed -n 's/.*clock_n lever at ~\([0-9-]*\) ~\([0-9-]*\) ~\([0-9-]*\).*/\1 \2 \3/p')
@@ -148,7 +156,15 @@ send() { echo "$1" >&3; sleep "${2:-1}"; }
 # spawnChunkRadius has no such cap: it keeps a square of chunks around spawn
 # loaded and ticking. 16 gives 33x33 chunks, 528 blocks each way, which covers
 # anything this compiler currently emits.
-send "gamerule spawnChunkRadius 16" 2
+# Radius chosen to cover the build and no more. Every loaded chunk is ticked
+# every tick, so an oversized square costs real time on a server that is
+# already the slow part of this loop.
+RAD=$(python3 -c "
+import math
+span = max(abs($MINX), abs($MINZ), $BX, $BZ)
+print(min(32, span // 16 + 2))")
+echo "spawnChunkRadius $RAD (covers +/-$((RAD*16)) blocks)"
+send "gamerule spawnChunkRadius $RAD" 2
 send "forceload add $MINX $MINZ $BX $BZ" 2
 send "reload" 3
 send "execute positioned 0.0 0.0 0.0 run function ohm:circuit" 5
@@ -201,6 +217,7 @@ run_input() {
 }
 
 NLEV=$(echo "$LEVERS" | grep -c .)
+[ "$NLEV" -gt 0 ] || { echo "no data input levers parsed - the sweep would be vacuous"; exit 1; }
 FULL=$((1 << NLEV))
 CASES=${OHMC_CASES:-$FULL}
 [ "$CASES" -le "$FULL" ] || CASES=$FULL
