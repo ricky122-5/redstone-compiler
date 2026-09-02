@@ -140,19 +140,45 @@ fn run(args: &[String]) -> Result<(), String> {
             Err(_) => bitblast::blast(&design),
         };
         let layout = layout::build(&placed_net)?;
+        // The control levers are reported in the same frame as everything else
+        // the caller is given, which means the *.mcfunction* frame when one is
+        // being written.
+        //
+        // They used to print raw layout coordinates while the port levers and
+        // lamps were translated, so a sequential design reported its clock at
+        // ~-6 ~6 ~-4 and its input lever at ~15 ~74 ~201 - two different
+        // origins, in the same block of output, with nothing to say so. Any
+        // harness driving the circuit would set blocks in empty air and read a
+        // dead machine.
+        let lo = layout.grid.bounds().map(|(lo, _)| lo).unwrap_or((0, 0, 0));
+        let origin = (0, 1, 0);
+        let mcfn_frame = mcfn_out.is_some();
+        let rel = |p: (i32, i32, i32)| {
+            if mcfn_frame {
+                (p.0 - lo.0 + origin.0, p.1 - lo.1 + origin.1, p.2 - lo.2 + origin.2)
+            } else {
+                p
+            }
+        };
         if layout.flops > 0 {
             println!("  sequential: {} flip-flop(s)", layout.flops);
-            if let Some(p) = layout.net_reset_lever {
-                println!("  state reset lever at ~{} ~{} ~{}  (pull with the reset lever)", p.0, p.1, p.2);
+            // Two resets, and they are different mechanisms. `reset` is the
+            // flip-flops' asynchronous clear; `state reset` drives the netlist's
+            // own Src::Reset, which only raises the entry block's D input and so
+            // has to be *clocked in*. Assert both with the clock still and the
+            // state vector is cleared and never loaded - the machine then sits
+            // there doing nothing while looking perfectly healthy.
+            if let Some(p) = layout.net_reset_lever.map(rel) {
+                println!("  state reset lever at ~{} ~{} ~{}  (hold, then clock once)", p.0, p.1, p.2);
             }
-            if let Some(p) = layout.clk_lever {
+            if let Some(p) = layout.clk_lever.map(rel) {
                 println!("  clock   lever at ~{} ~{} ~{}", p.0, p.1, p.2);
             }
-            if let Some(p) = layout.clk_n_lever {
+            if let Some(p) = layout.clk_n_lever.map(rel) {
                 println!("  clock_n lever at ~{} ~{} ~{}", p.0, p.1, p.2);
             }
-            if let Some(p) = layout.rst_lever {
-                println!("  reset   lever at ~{} ~{} ~{}", p.0, p.1, p.2);
+            if let Some(p) = layout.rst_lever.map(rel) {
+                println!("  reset   lever at ~{} ~{} ~{}  (async clear)", p.0, p.1, p.2);
             }
         }
 
@@ -166,9 +192,8 @@ fn run(args: &[String]) -> Result<(), String> {
             );
         }
 
-        if let Some(fn_path) = mcfn_out {
+        if let Some(fn_path) = mcfn_out.clone() {
             // Lift the build clear of the ground so nothing is buried.
-            let origin = (0, 1, 0);
             let text = structure::to_mcfunction(&layout.grid, origin);
             let lines = text.lines().filter(|l| l.starts_with("setblock")).count();
             std::fs::write(&fn_path, &text).map_err(|e| format!("{fn_path}: {e}"))?;
@@ -176,10 +201,6 @@ fn run(args: &[String]) -> Result<(), String> {
 
             // Port coordinates in the same relative frame as the commands, so
             // the circuit can actually be driven and read once it is placed.
-            let lo = layout.grid.bounds().map(|(lo, _)| lo).unwrap_or((0, 0, 0));
-            let rel = |p: (i32, i32, i32)| {
-                (p.0 - lo.0 + origin.0, p.1 - lo.1 + origin.1, p.2 - lo.2 + origin.2)
-            };
             for (name, levers) in &layout.input_levers {
                 for (bit, &p) in levers.iter().enumerate() {
                     let r = rel(p);
