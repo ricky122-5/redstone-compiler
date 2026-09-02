@@ -13,7 +13,6 @@
 use ohmc::redstone::Sim;
 use ohmc::world::Pos;
 use ohmc::{bitblast, layout, lower, parser};
-use std::collections::HashMap;
 
 fn main() {
     let path = std::env::args().nth(1).unwrap_or("examples/tick.ohm".into());
@@ -44,6 +43,9 @@ fn main() {
         sim.set_lever(lay.clk_lever.unwrap(), clk);
         sim.set_lever(lay.clk_n_lever.unwrap(), clkn);
         sim.set_lever(lay.rst_lever.unwrap(), rst);
+        if let Some(r) = lay.net_reset_lever {
+            sim.set_lever(r, rst);
+        }
         let (t, ok) = sim.run_until_stable(warm);
         println!(
             "{label}: settled={ok} after {t} ticks, {} pending, {} torches burnt",
@@ -59,6 +61,9 @@ fn main() {
     sim.set_lever(lay.clk_lever.unwrap(), false);
     sim.set_lever(lay.clk_n_lever.unwrap(), true);
     sim.set_lever(lay.rst_lever.unwrap(), true);
+    if let Some(r) = lay.net_reset_lever {
+        sim.set_lever(r, true);
+    }
     let t1 = std::time::Instant::now();
     sim.run(warm);
     eprintln!("ran {warm} ticks in {:?}, {} still pending", t1.elapsed(), sim.state.pending_len());

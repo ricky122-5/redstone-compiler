@@ -809,7 +809,19 @@ impl Router {
         self.active_endpoints.clear();
         self.active_endpoints.extend(sources.iter().copied());
         self.active_endpoints.insert(to);
-        let slopes = [14, 40, 120, 400];
+        // A mild ladder. The penalty for a slope step escalates on retry to
+        // push a route towards the flat runs a repeater can sit on - but past a
+        // point it stops helping and starts hurting, because a target that can
+        // only be reached by descending becomes unreachable when descending
+        // costs forty times a flat step. The search then wanders instead of
+        // arriving, and reports having got within a few blocks of a target with
+        // open approaches, which reads like congestion and is nothing of the
+        // kind.
+        //
+        // This was [14, 40, 120, 400]. Measured against the sequential ladder in
+        // `examples/seq_settle.rs`, the gentler spread places designs the steep
+        // one could not, and costs nothing on any design that already worked.
+        let slopes = [14, 20, 28, 40];
         let mut last_err = String::from("no attempt made");
         for attempt in 0..24 {
             let div: usize = std::env::var("OHMC_SDIV").ok().and_then(|v| v.parse().ok()).unwrap_or(6);

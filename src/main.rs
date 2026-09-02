@@ -142,6 +142,9 @@ fn run(args: &[String]) -> Result<(), String> {
         let layout = layout::build(&placed_net)?;
         if layout.flops > 0 {
             println!("  sequential: {} flip-flop(s)", layout.flops);
+            if let Some(p) = layout.net_reset_lever {
+                println!("  state reset lever at ~{} ~{} ~{}  (pull with the reset lever)", p.0, p.1, p.2);
+            }
             if let Some(p) = layout.clk_lever {
                 println!("  clock   lever at ~{} ~{} ~{}", p.0, p.1, p.2);
             }

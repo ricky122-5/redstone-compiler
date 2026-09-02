@@ -97,6 +97,34 @@ fn main() {
             net.set_dff_d(idx[i], s);
         }
         net.outputs.push(("q".into(), qs));
-        report(&format!("{n} flops, {depth} deep"), &net);
+        report(&format!("{n} flops, {depth} deep (inverter chains)"), &net);
+    }
+
+    // The same sizes, but with *multi-input* gates and reconvergent fan-out -
+    // which is what a real FSM looks like and what the inverter chains above
+    // deliberately are not. Every gate here reads two different flip-flops, so
+    // Q values travel much further and cross each other constantly.
+    for (n, depth) in [(6usize, 3usize), (11, 4), (11, 8)] {
+        let mut net = Netlist::new();
+        let mut idx = Vec::new();
+        let mut qs = Vec::new();
+        for i in 0..n {
+            let (a, q) = net.add_dff(&format!("r{i}"));
+            idx.push(a);
+            qs.push(q);
+        }
+        let mut layer: Vec<u32> = qs.clone();
+        for _ in 0..depth {
+            let mut next = Vec::new();
+            for i in 0..n {
+                next.push(net.nor(&[layer[i], layer[(i + 3) % n]]));
+            }
+            layer = next;
+        }
+        for i in 0..n {
+            net.set_dff_d(idx[i], layer[i]);
+        }
+        net.outputs.push(("q".into(), qs));
+        report(&format!("{n} flops, {depth} deep (2-input, reconvergent)"), &net);
     }
 }

@@ -108,6 +108,17 @@ pub struct Layout {
     pub output_lamps: Vec<(String, Vec<Pos>)>,
     pub levels: usize,
     pub gates: usize,
+    /// The netlist's own reset signal, if the design has one.
+    ///
+    /// This is a *different* lever from [`Self::rst_lever`] and both must be
+    /// pulsed together. `rst_lever` drives the flip-flops' asynchronous clear,
+    /// which puts every register at zero; this one drives `Src::Reset`, which
+    /// the bit-blaster uses to force the one-hot state vector to the entry
+    /// block. Clearing without it leaves the state vector all zero, so *no*
+    /// block is active and the machine sits there doing nothing forever - which
+    /// is exactly what `tick` did, silently, because nothing exposed this lever
+    /// and no harness knew to pull it.
+    pub net_reset_lever: Option<Pos>,
     /// Clock, inverted clock and reset levers. Empty for a combinational build.
     ///
     /// The clock is supplied as two externally driven phases rather than one
@@ -212,6 +223,15 @@ fn staged_route(
     // open space does.
     let steep = if rise.abs() * STEEP_SLACK > span_h { 2 } else { 1 };
     let stages = vstages.max(hstages).max(steep).max(1);
+
+    // Note that staging does *not* make a steep connection less steep: the
+    // relays are interpolated between the endpoints, so every hop inherits the
+    // grade of the whole. Staging helps because each hop is short enough for the
+    // router to find a buildable shape, and because the relay's own site search
+    // is free to move it off the line by a few blocks. Pushing the whole chain
+    // deliberately off the line to buy horizontal room was tried and measured
+    // worse - it puts relays in space other nets need, and cost three of twelve
+    // designs on the sequential ladder.
 
     let mut from: Vec<Pos> = sources.to_vec();
     let mut carry = decay;
@@ -398,6 +418,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     leaves.sort();
     let lever_y = LEVEL_H;
     let mut widest = 1;
+    let mut net_reset_lever: Option<Pos> = None;
     for (i, &s) in leaves.iter().enumerate() {
         // Levers sit three apart so their dust taps cannot touch.
         let x = i as i32 * 3;
@@ -414,6 +435,9 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         grid.set((tap.0, tap.1 - 1, tap.2), Block::Solid(mat))?;
         grid.set(tap, Block::Dust { power: 0 })?;
         source_of.insert(s, tap);
+        if matches!(net.src(s), Src::Reset) {
+            net_reset_lever = Some(pos);
+        }
         widest = widest.max(x + 3);
     }
 
@@ -1186,6 +1210,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         output_lamps,
         levels: max_level as usize + 1,
         gates: gates.len(),
+        net_reset_lever,
         clk_lever: clk_lever.map(|t| (t.0, t.1, t.2 + 1)),
         clk_n_lever: clk_n_lever.map(|t| (t.0, t.1, t.2 + 1)),
         rst_lever: rst_lever.map(|t| (t.0, t.1, t.2 + 1)),

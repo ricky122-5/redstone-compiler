@@ -28,8 +28,14 @@ fn main() {
 
     let levers: Vec<Pos> = lay.input_levers.iter().flat_map(|(_, v)| v.clone()).collect();
     let lamps: Vec<Pos> = lay.output_lamps.iter().flat_map(|(_, v)| v.clone()).collect();
-    let (clk, clkn, rst) =
-        (lay.clk_lever.unwrap(), lay.clk_n_lever.unwrap(), lay.rst_lever.unwrap());
+    let (clk, clkn) = (lay.clk_lever.unwrap(), lay.clk_n_lever.unwrap());
+    // Both resets, pulsed together. `rst_lever` clears the flip-flops;
+    // `net_reset_lever` drives the netlist's own `Src::Reset`, which is what
+    // forces the one-hot state vector to the entry block. Clearing without it
+    // leaves every state bit at zero, so no block is active and the machine
+    // sits there for ever - which looks exactly like a dead circuit.
+    let rsts: Vec<Pos> = [lay.rst_lever, lay.net_reset_lever].into_iter().flatten().collect();
+    println!("reset levers: {rsts:?}");
 
     for v in 0..(1usize << levers.len()).min(4) {
         let mut sim = Sim::new(&lay.grid);
@@ -41,11 +47,15 @@ fn main() {
         // placement left, so it has to be driven in.
         sim.set_lever(clk, false);
         sim.set_lever(clkn, true);
-        sim.set_lever(rst, true);
+        for &r in &rsts {
+            sim.set_lever(r, true);
+        }
         let t0 = std::time::Instant::now();
         let (rt, ok_r) = sim.run_until_stable(budget);
         eprintln!("  reset assert: {rt} ticks, settled={ok_r}, {:?}", t0.elapsed());
-        sim.set_lever(rst, false);
+        for &r in &rsts {
+            sim.set_lever(r, false);
+        }
         let t1 = std::time::Instant::now();
         let (rt2, ok_r2) = sim.run_until_stable(budget);
         eprintln!("  reset release: {rt2} ticks, settled={ok_r2}, {:?}", t1.elapsed());
