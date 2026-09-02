@@ -556,15 +556,53 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         // further right. That is the classic linear-placement sweep: it keeps
         // the ordering, never overlaps, and collapses to the old behaviour when
         // every wish is at the origin.
-        let mut x = i32::MIN;
+        // Sweep left to right, then re-centre the row on its drivers.
+        //
+        // The sweep alone puts each gate at its wish or just past its
+        // predecessor, whichever is further right, which is the minimal packing
+        // that respects both. But when a level has more gates than its wishes
+        // are spread over, the surplus can only go rightward - and the *next*
+        // level's wishes are the mean of these positions, so the drift is
+        // inherited and compounds down the array. `tick` ended up 244 blocks
+        // wide for rows that pack into 88, and a build wider than 256 blocks
+        // cannot be force-loaded into a Minecraft server at all: the far side
+        // sits in chunks where commands work and redstone does not.
+        //
+        // Re-centring costs nothing - the row keeps its order, its packing and
+        // its width - and it removes the drift, because the row's midpoint now
+        // tracks its drivers' midpoint instead of running away from it.
+        let mut plan: Vec<(Sig, i32, i32)> = Vec::new();
+        let mut x = 0;
         for g in row {
             let wish = want_x(g, &placed);
-            let at = if wish == i64::MIN / 2 { x.max(0) } else { (wish as i32).max(x) };
-            let at = at.max(0);
+            let k = net.operands(g).len().max(1);
+            let width = (k as i32 - 1) * 2 + 1;
+            let at = if wish == i64::MIN / 2 { x } else { (wish as i32).max(x) };
+            plan.push((g, at, width));
+            x = at + width + GATE_GAP;
+        }
+        if let (Some(&(_, first, _)), Some(&(_, last, lw))) = (plan.first(), plan.last()) {
+            let wishes: Vec<i32> = plan
+                .iter()
+                .map(|&(g, _, _)| want_x(g, &placed))
+                .filter(|&w| w != i64::MIN / 2)
+                .map(|w| w as i32)
+                .collect();
+            if !wishes.is_empty() {
+                let want_mid = (wishes.iter().min().unwrap() + wishes.iter().max().unwrap()) / 2;
+                let have_mid = (first + last + lw - 1) / 2;
+                // Never past the origin: the lever row and the register bank
+                // both start there, and negative X is not free space.
+                let shift = (want_mid - have_mid).min(0).max(-first);
+                for e in plan.iter_mut() {
+                    e.1 += shift;
+                }
+            }
+        }
+        for (g, at, _) in plan {
             let k = net.operands(g).len().max(1);
             let cell = stamp_nor(&mut grid, (at, -l * LEVEL_H, GATE_Z), k)?;
-            x = at + cell.width + GATE_GAP;
-            widest = widest.max(x);
+            widest = widest.max(at + cell.width + GATE_GAP);
             placed.insert(g, Placed { cell });
         }
     }
