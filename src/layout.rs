@@ -163,12 +163,24 @@ fn staged_route(
     decay: i32,
     chain: &mut usize,
 ) -> Result<(), String> {
-    let top = sources[0].1;
+    // Measure from the *nearest* source, not the first one.
+    //
+    // Every cell of a spine or trunk is an equally valid place to leave from,
+    // and the router picks whichever suits it. Planning from `sources[0]` means
+    // planning from the far end: once the control trunks ran the length of the
+    // bank, a reset route to a flip-flop a few blocks off the trunk was measured
+    // as spanning the whole bank and broken into four stages it did not need,
+    // each of which then had to find room inside the register bank itself.
+    let anchor = *sources
+        .iter()
+        .min_by_key(|s| (s.0 - target.0).abs() + (s.1 - target.1).abs() + (s.2 - target.2).abs())
+        .unwrap_or(&sources[0]);
+    let top = anchor.1;
     // Signed, because bank wiring *climbs*: a gate's output is below the flop's
     // input pad, so D runs upward where every gate connection runs down.
     let rise = target.1 - top;
-    let span_x = (target.0 - sources[0].0).abs();
-    let span_h = span_x + (target.2 - sources[0].2).abs();
+    let span_x = (target.0 - anchor.0).abs();
+    let span_h = span_x + (target.2 - anchor.2).abs();
 
     let vstages = (rise.abs() + MAX_DROP - 1) / MAX_DROP;
     let hstages = (span_h + MAX_HOP - 1) / MAX_HOP;
@@ -182,7 +194,7 @@ fn staged_route(
     let mut from: Vec<Pos> = sources.to_vec();
     let mut carry = decay;
     for stage in 1..stages {
-        let rx = sources[0].0 + (target.0 - sources[0].0) * stage / stages;
+        let rx = anchor.0 + (target.0 - anchor.0) * stage / stages;
         let ry = top + rise * stage / stages;
         // Z is interpolated between the endpoints, like X and Y - not parked in
         // the riser field.
@@ -196,7 +208,7 @@ fn staged_route(
         // 3 had nowhere to go. Interpolating keeps every hop on the line between
         // the two ends whichever way that line runs.
         let band = (*chain % RELAY_BANDS as usize) as i32;
-        let rz = sources[0].2 + (target.2 - sources[0].2) * stage / stages + band * 3;
+        let rz = anchor.2 + (target.2 - anchor.2) * stage / stages + band * 3;
         // Search outward in Z in both directions. The nominal site can land
         // inside a flip-flop macro, which is 55 blocks deep, and a one-sided
         // scan cannot always get clear of one.
