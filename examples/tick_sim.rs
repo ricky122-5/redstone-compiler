@@ -43,22 +43,54 @@ fn main() {
         for (b, &l) in levers.iter().enumerate() {
             sim.set_lever(l, (v >> b) & 1 == 1);
         }
-        // Pulse reset with the clock low: state after placement is whatever
-        // placement left, so it has to be driven in.
+        // The two resets are different mechanisms and need different handling.
+        //
+        // `rst_lever` is the flip-flops' *asynchronous* clear: assert it and
+        // every register goes to zero immediately, no clock required. That is
+        // what puts the build into a known state after placement, since the
+        // lit/powered flags chosen at stamp time do not survive setblock.
+        //
+        // `net_reset_lever` drives the netlist's `Src::Reset`, and that one is
+        // *synchronous*: all it does is make the entry block's D input high. It
+        // has to be clocked in. Holding both with the clock still - which is the
+        // obvious thing to do, and what this harness did - clears the state
+        // vector to zero and then never loads anything, so no block is ever
+        // active and the machine sits at Q=00000000000 for ever while settling
+        // perfectly at every step.
+        //
+        // So: clear asynchronously, release, then assert the synchronous reset
+        // and clock it in.
+        let clear = |sim: &mut Sim, on: bool| {
+            if let Some(r) = lay.rst_lever {
+                sim.set_lever(r, on);
+            }
+        };
+        let tick = |sim: &mut Sim| -> (u64, bool) {
+            sim.set_lever(clk, true);
+            sim.set_lever(clkn, false);
+            let (a, oka) = sim.run_until_stable(budget);
+            sim.set_lever(clk, false);
+            sim.set_lever(clkn, true);
+            let (b, okb) = sim.run_until_stable(budget);
+            (a + b, oka && okb)
+        };
         sim.set_lever(clk, false);
         sim.set_lever(clkn, true);
-        for &r in &rsts {
+        clear(&mut sim, true);
+        let (rt, ok_r) = sim.run_until_stable(budget);
+        clear(&mut sim, false);
+        let (rt2, ok_r2) = sim.run_until_stable(budget);
+        eprintln!("  async clear: {rt}/{rt2} ticks, settled={ok_r}/{ok_r2}");
+        // Now load the entry state: hold Src::Reset and clock once.
+        if let Some(r) = lay.net_reset_lever {
             sim.set_lever(r, true);
         }
-        let t0 = std::time::Instant::now();
-        let (rt, ok_r) = sim.run_until_stable(budget);
-        eprintln!("  reset assert: {rt} ticks, settled={ok_r}, {:?}", t0.elapsed());
-        for &r in &rsts {
+        let (lt, ok_l) = tick(&mut sim);
+        if let Some(r) = lay.net_reset_lever {
             sim.set_lever(r, false);
         }
-        let t1 = std::time::Instant::now();
-        let (rt2, ok_r2) = sim.run_until_stable(budget);
-        eprintln!("  reset release: {rt2} ticks, settled={ok_r2}, {:?}", t1.elapsed());
+        let (lt2, ok_l2) = sim.run_until_stable(budget);
+        eprintln!("  state load:  {lt}/{lt2} ticks, settled={ok_l}/{ok_l2}");
 
         let read = |sim: &Sim| -> usize {
             let f = sim.field();
@@ -69,21 +101,18 @@ fn main() {
         let mut settled = true;
         for c in 0..cycles {
             let t = std::time::Instant::now();
-            // Master transparent, slave closed.
-            sim.set_lever(clk, true);
-            sim.set_lever(clkn, false);
-            let (a, oka) = sim.run_until_stable(budget);
-            // Falling edge: the slave takes the bit.
-            sim.set_lever(clk, false);
-            sim.set_lever(clkn, true);
-            let (b, okb) = sim.run_until_stable(budget);
-            settled &= oka && okb;
+            let (ticks, ok) = tick(&mut sim);
+            settled &= ok;
             let now = read(&sim);
-            eprintln!(
-                "  cycle {c:>3}: lamps={now} ticks={a}/{b} settled={} {:?}",
-                oka && okb,
-                t.elapsed()
-            );
+            // The state register itself, so a machine that is not advancing is
+            // visible as a stuck vector rather than as a lamp that never lights.
+            let f = sim.field();
+            let state: String = lay
+                .flop_ports
+                .iter()
+                .map(|p| if f.dust_at(p.q) > 0 { '1' } else { '0' })
+                .collect();
+            eprintln!("  cycle {c:>3}: lamps={now} Q={state} ticks={ticks} settled={ok} {:?}", t.elapsed());
             trace.push(now);
         }
 
