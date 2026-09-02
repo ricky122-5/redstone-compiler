@@ -38,13 +38,41 @@ Programs with loops or branches synthesise a control FSM and real registers.
 Those place: a register bank, both clock phases and reset distributed to it, and
 each flip-flop's Q wired back as a source the combinational cone reads.
 
-The limit is size, and it sits upstream of the floorplan. One bit of state is a
-68 x 113 macro - down from 68 x 141, by tightening the D latch's stage pitch -
-so any bank of a useful width still dwarfs the logic it serves. `tick.ohm`
-(99 gates, 11 flip-flops) stalls partway through routing whichever way the bank
-is tiled, because rows cost Q reach and columns cost width, and the shrink was
-not enough to change that. Making `gcd.ohm` (724 gates, 42 flip-flops) place
-needs a materially smaller flip-flop, not a slightly smaller one.
+`tick.ohm` (99 gates, 11 flip-flops, 6 basic blocks) places and runs. Reset it,
+clock it, and the one-hot state vector walks the basic blocks:
+
+```
+go=0   00000100000 -> 00000001000 -> 00000000010 -> 00000010000
+       -> halt at cycle 4, done = 0
+go=1   00100100000 -> 00100001000 -> 00100000100 -> 00010001000
+       -> 00010000010 -> 01010010000 -> halt at cycle 6, done = 1
+```
+
+The golden model says 5 and 7 cycles; the placed circuit halts on exactly
+those, and every clock phase settles - 116 ticks once halted, no torch burnout,
+nothing left pending.
+
+Getting there needed one thing that is easy to state and was not easy to find:
+**a design with an FSM has two resets, and they are different mechanisms.**
+`rst_lever` is the flip-flops' asynchronous clear - assert it and every register
+goes to zero at once, no clock needed, which is what puts the build into a known
+state after a `.mcfunction` places it one block at a time. `net_reset_lever`
+drives the netlist's own `Src::Reset`, and that one is *synchronous*: all it does
+is raise the entry block's D input, so it has to be clocked in. Hold both with
+the clock still - the obvious thing to do - and the state vector is cleared and
+then never loaded. No block is ever active, so the machine sits at
+`Q=00000000000` for ever, settling perfectly at every step and computing
+nothing. It looks exactly like a dead circuit and is a dead *procedure*.
+
+The size problem that used to block this is gone. One bit of state was a
+68 x 141 macro, then 68 x 113; it is now **35 x 55**, a quarter of the area, and
+nothing about the circuit changed to get there - only the spacing, which was
+chosen when the D latch's five cells were wired by hand and was never revisited
+after the router took that job over. Every constant in it is a measured floor:
+at a tighter pitch the latch will not store a 1, at a closer offset the R gate's
+feed is walled in completely.
+
+`gcd.ohm` (724 gates, 42 flip-flops) has not been attempted at this size yet.
 
 ## Quick start
 
@@ -262,6 +290,12 @@ cargo test        # 101 tests
 - **Straight-line programs compile to placed, simulated, loadable redstone**,
   up to a few dozen gates. Inverters, AND/OR/XOR, 3-input majority and XOR all
   place and are verified by simulating the emitted blocks.
+- **Programs with a control FSM place, clock and compute.** `tick.ohm` - 99
+  gates, 11 flip-flops, 6 basic blocks - resets, runs its state machine, halts
+  on the cycle the golden model predicts, and produces the right answer for both
+  inputs. `examples/seq_settle.rs` walks a ladder of synthetic sequential designs
+  from one flip-flop up to eleven flops and 121 gates; every one places *and
+  settles*.
 
 **Not done — the honest gap:**
 
