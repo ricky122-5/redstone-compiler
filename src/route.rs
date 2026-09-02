@@ -97,6 +97,11 @@ fn dir_index(d: Dir) -> DirIdx {
 /// keep alive over distance.
 const TURN_COST: i32 = 25;
 
+/// Cheapest a slope step can be, and what the heuristic charges for each level
+/// it still has to descend. Must not exceed the smallest value on `route`'s
+/// slope ladder or the bound stops being admissible.
+const SLOPE_FLOOR: i32 = 14;
+
 #[derive(PartialEq, Eq)]
 struct Frontier {
     /// Negated so `BinaryHeap` (a max-heap) pops the lowest cost first.
@@ -264,19 +269,55 @@ impl Router {
                 return false;
             }
         }
-        // The signal has to be able to leave. A site whose own three cells are
-        // clear can still be walled in just past its output, and the next stage
-        // then fails with nowhere to start - the router reports zero open exits
-        // at the source. Insist on somewhere to go before committing the relay.
-        let exits = Dir::ALL
-            .iter()
-            .flat_map(|&d| {
-                let n = offset(out, d);
-                [n, up(n), down(n)]
-            })
-            .filter(|&c| c != pos && self.placeable(grid, c, net))
-            .count();
-        exits >= 2
+        // The signal has to be able to leave *and* to arrive. A site whose own
+        // three cells are clear can still be walled in just past either end:
+        // walled past the output, the next stage fails with nowhere to start;
+        // walled past the input, the route *into* the relay fails instead, and
+        // that is the harder failure to read - the router burns its whole budget
+        // getting within a few blocks of a target it can never touch.
+        //
+        // Only the exit was checked, so the entrance side was chosen blind. In
+        // `tick` that is the whole ballgame: relays crowd into a shared band, a
+        // site's three cells are clear because it is the last hole in a wall,
+        // and the route in cannot reach it. Insist on both.
+        let room = |c: Pos| {
+            Dir::ALL
+                .iter()
+                .flat_map(|&d| {
+                    let n = offset(c, d);
+                    [n, up(n), down(n)]
+                })
+                .filter(|&q| q != pos && self.placeable(grid, q, net))
+                .count()
+        };
+        room(out) >= 2 && room(inp) >= 2
+    }
+
+    /// How much elbow room a relay site has, or `None` if it is not usable at
+    /// all.
+    ///
+    /// [`Self::relay_site_clear`] answers yes-or-no, and taking the first yes is
+    /// how chains strangle each other: a site with the bare minimum of two
+    /// approaches is fine until the route *into* it uses one of them, and then
+    /// the next stage has nowhere to start. The caller can compare candidates
+    /// instead of accepting the first.
+    pub fn relay_site_room(&self, grid: &Grid, pos: Pos, net: NetId) -> Option<usize> {
+        if !self.relay_site_clear(grid, pos, net) {
+            return None;
+        }
+        let inp = (pos.0, pos.1, pos.2 - 1);
+        let out = (pos.0, pos.1, pos.2 + 1);
+        let room = |c: Pos| {
+            Dir::ALL
+                .iter()
+                .flat_map(|&d| {
+                    let n = offset(c, d);
+                    [n, up(n), down(n)]
+                })
+                .filter(|&q| q != pos && self.placeable(grid, q, net))
+                .count()
+        };
+        Some(room(inp).min(room(out)))
     }
 
     /// Remove everything `net` routed, freeing the space for someone else.
@@ -428,15 +469,55 @@ impl Router {
         out
     }
 
-    /// Lower bound on remaining steps. A slope step covers one horizontal and
-    /// one vertical block at once, so the bound is the larger of the two.
+    /// Lower bound on the remaining *cost*, not on the remaining steps.
+    ///
+    /// A slope step covers one horizontal and one vertical block at once, so at
+    /// least `vert` of the remaining steps must be slopes and at least
+    /// `horiz - vert` of them must be flat. Pricing them at what they actually
+    /// cost - `slope_cost` and 10 - gives a much tighter bound than counting
+    /// steps and multiplying by the cheapest one.
+    ///
+    /// The vertical price is a fixed floor, not the caller's current
+    /// `slope_cost`. Using the live value looks tighter and destroys the retry
+    /// ladder: [`Self::route`] escalates `slope_cost` to push a route towards
+    /// flat runs that a repeater can sit on, and a heuristic that escalates with
+    /// it cancels the push exactly, leaving the search just as happy with a pure
+    /// staircase at a slope cost of 400 as at 14. Every combinational design
+    /// stopped placing, all with "no flat run to hold a repeater". Charging the
+    /// floor keeps the bound admissible and leaves the ladder its teeth.
+    ///
+    /// Tightness is not the point, though; the *shape* is. A slope costs more
+    /// than a flat step, so a search that does not charge for the descent it
+    /// still owes will always put it off, running flat towards the target and
+    /// trying to fall at the end. That is precisely how `tick` failed: the
+    /// router arrived a couple of blocks from a gate's feed with six levels
+    /// still to drop and three blocks of room to drop them in, and dust falls
+    /// one level per block travelled. Charging the descent up front makes an
+    /// early descent and a late one cost the same, so the search stops deferring
+    /// it.
     fn heuristic(a: Pos, b: Pos) -> i32 {
         let horiz = (a.0 - b.0).abs() + (a.2 - b.2).abs();
         let vert = (a.1 - b.1).abs();
-        horiz.max(vert)
+        vert * SLOPE_FLOOR + (horiz - vert).max(0) * 10
     }
 
     /// Find a path from an existing wire node to a target cell.
+    ///
+    /// `weight` inflates the heuristic in tenths: 10 leaves it exact, 13 makes
+    /// it 1.3x. At 10 the search is exact A*, and in open space that is a
+    /// disaster: every
+    /// monotone path to the target then has the same f-score, so the search has
+    /// no reason to prefer any of them and enumerates the lot. `tick` failed a
+    /// 111-block hop through a volume a dump showed was *completely empty*,
+    /// having spent 250,000 expansions on ties - a failure that reads exactly
+    /// like congestion and is its opposite. Above 10 the ties break toward the
+    /// target and the search runs greedily where nothing is in the way, at the
+    /// price of paths that may be longer than optimal.
+    ///
+    /// Greedy is not free, though, and it cannot simply be turned on: inside the
+    /// D latch a greedy route takes a wasteful path through a macro that has no
+    /// room to waste, walls in the next route's source, and the macro stops
+    /// building at all. So the caller ladders it - see [`Self::route`].
     ///
     /// `slope_cost` prices a step that changes Y. Raising it makes the router
     /// prefer flat runs, which matters because **a repeater cannot sit on a
@@ -451,6 +532,8 @@ impl Router {
         to: Pos,
         bounds: (Pos, Pos),
         slope_cost: i32,
+        weight: i32,
+        budget: usize,
     ) -> Result<Path, String> {
         let inside = |p: Pos| {
             p.0 >= bounds.0 .0
@@ -472,11 +555,26 @@ impl Router {
         // congestion right at the driver.
         for &src in sources {
             best.insert((src, 4), 0);
-            heap.push(Frontier { priority: -Self::heuristic(src, to), cost: 0, pos: src, dir: 4 });
+            heap.push(Frontier {
+                priority: -Self::heuristic(src, to) * weight / 10,
+                cost: 0,
+                pos: src,
+                dir: 4,
+            });
         }
 
         let mut expansions = 0usize;
+        // How close the search ever got, so a failure can say whether it was
+        // walled in near the target or simply wandering. "Gave up after N
+        // expansions" does not distinguish those, and they need opposite fixes.
+        let mut closest = i32::MAX;
+        let mut closest_at = to;
         while let Some(Frontier { cost, pos, dir, .. }) = heap.pop() {
+            let h = Self::heuristic(pos, to);
+            if h < closest {
+                closest = h;
+                closest_at = pos;
+            }
             if pos == to {
                 let mut nodes = vec![to];
                 let mut cur = (to, dir);
@@ -491,8 +589,8 @@ impl Router {
                 continue;
             }
             expansions += 1;
-            if expansions > self.max_expansions {
-                return Err(format!("router gave up after {expansions} expansions"));
+            if expansions > budget {
+                return Err(format!("router gave up after {expansions} expansions (closest approach {closest} at {closest_at:?})"));
             }
 
             for (q, qdir) in self.neighbors(pos) {
@@ -520,7 +618,7 @@ impl Router {
                     best.insert(key, next);
                     came.insert(key, (pos, dir));
                     heap.push(Frontier {
-                        priority: -(next + Self::heuristic(q, to) * 10),
+                        priority: -(next + Self::heuristic(q, to) * weight / 10),
                         cost: next,
                         pos: q,
                         dir: qdir,
@@ -711,7 +809,35 @@ impl Router {
         let slopes = [14, 40, 120, 400];
         let mut last_err = String::from("no attempt made");
         for attempt in 0..24 {
-            let slope_cost = slopes[(attempt / 6).min(slopes.len() - 1)];
+            let div: usize = std::env::var("OHMC_SDIV").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+            let slope_cost = slopes[(attempt / div).min(slopes.len() - 1)];
+            // Cycle the heuristic weight, exact first, rather than escalating
+            // it one way.
+            //
+            // The two failure modes want opposite searches, and neither is a
+            // strictly harder version of the other. A short route inside a packed
+            // macro needs an exact search: a greedy path there drives straight at
+            // the target, dead-ends, and on the way wastes space the next route
+            // needs - turn greedy on globally and the D latch stops building at
+            // all. A long route across open ground needs a greedy one: an exact
+            // search drowns in equally-good alternatives, and `tick` failed a
+            // 111-block hop through a volume a dump showed was completely empty.
+            //
+            // So each attempt tries a different regime while `scratch` keeps
+            // growing underneath, and a route only fails if every regime fails
+            // with every barred cell. Exact goes first so tight routes are found
+            // immediately and never pay for a greedy detour, and it gets a
+            // smaller budget so a hopeless exact search is abandoned quickly
+            // instead of burning the full quarter-million on ties.
+            let wmode: usize = std::env::var("OHMC_WMODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+            let (weight, budget) = match (wmode, attempt % 3) {
+                (1, _) => (10, self.max_expansions),
+                (2, _) => (13, self.max_expansions),
+                (3, _) => (18, self.max_expansions),
+                (_, 0) => (10, 80_000),
+                (_, 1) => (18, self.max_expansions),
+                (_, _) => (13, self.max_expansions),
+            };
             // Search a box around the two endpoints rather than the whole
             // build. Most routes are local, and bounding the volume is the
             // difference between thousands of expansions and hundreds of
@@ -736,7 +862,7 @@ impl Router {
                     (from.2.max(to.2) + margin).min(bounds.1 .2),
                 ),
             );
-            match self.find(grid, net, sources, to, local, slope_cost) {
+            match self.find(grid, net, sources, to, local, slope_cost, weight, budget) {
                 Ok(path) => {
                     if let Some(bad) = Self::first_conflict(&path.nodes) {
                         last_err = "path collides with itself".to_string();

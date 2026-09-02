@@ -41,6 +41,22 @@ const STUB_LEN: i32 = 4;
 const SPINE_LEN: i32 = 5;
 /// Longest an output spine may grow for a high-fanout net.
 const SPINE_MAX: i32 = 24;
+/// How often a driver's output spine is refreshed by a repeater.
+///
+/// A spine used to be plain dust however long it was, and the fan-out scaling
+/// makes it up to 24 cells. Dust dies after 15, so the far half of a wide
+/// driver's spine was simply dark - and worse, the router was told to assume a
+/// branch might leave from the far end, which charged the repeater planner the
+/// whole spine length before the route had laid a single block. With a spine
+/// longer than the 13-block dust budget that is unsatisfiable by construction:
+/// `tick` failed on connection 113 with "route ran 21 blocks with no flat run to
+/// hold a repeater", and no amount of search tuning could have helped, because
+/// the budget was gone before the search started.
+///
+/// Refreshing every sixth cell caps the worst-case tap at five blocks of decay
+/// whatever the spine's length, which leaves a route most of its budget and
+/// makes every tap live.
+const SPINE_REFRESH: i32 = 6;
 /// Largest vertical drop a single route may attempt.
 ///
 /// Dust falls one block of Y per block of horizontal travel, and it cannot carry
@@ -123,6 +139,118 @@ fn stamp_relay(grid: &mut Grid, pos: Pos) -> Result<(Pos, Pos), String> {
     grid.set(pos, Block::Repeater { facing: Dir::North, delay: 1, powered: false })?;
     grid.set(out, Block::Dust { power: 0 })?;
     Ok((inp, out))
+}
+
+/// Route a connection in relay stages, so no single hop has to be long, steep
+/// or both.
+///
+/// The gate work list has staged its connections since relays existed; the
+/// register bank's own wiring - D, both clock phases and reset - did not, and
+/// went out as one unbroken hop each. Those are the *longest* nets in the
+/// build by a wide margin: a bank sits behind the gate array in Z and a flop's
+/// D pad is on its far north face, so `tick` asked the router for a single
+/// 307-block climb and it gave up having got 40 blocks in. This is the same
+/// staging, factored out.
+#[allow(clippy::too_many_arguments)]
+fn staged_route(
+    grid: &mut Grid,
+    router: &mut Router,
+    net_id: Sig,
+    sources: &[Pos],
+    target: Pos,
+    bounds: (Pos, Pos),
+    material: Material,
+    decay: i32,
+    chain: &mut usize,
+) -> Result<(), String> {
+    let top = sources[0].1;
+    // Signed, because bank wiring *climbs*: a gate's output is below the flop's
+    // input pad, so D runs upward where every gate connection runs down.
+    let rise = target.1 - top;
+    let span_x = (target.0 - sources[0].0).abs();
+    let span_h = span_x + (target.2 - sources[0].2).abs();
+
+    let vstages = (rise.abs() + MAX_DROP - 1) / MAX_DROP;
+    let hstages = (span_h + MAX_HOP - 1) / MAX_HOP;
+    // A descent needs at least as much horizontal room as it has depth, since
+    // dust falls one block of Y per block travelled. Endpoints close together
+    // but far apart vertically do not provide it; staging through a relay out in
+    // open space does.
+    let steep = if rise.abs() > span_h { 2 } else { 1 };
+    let stages = vstages.max(hstages).max(steep).max(1);
+
+    let mut from: Vec<Pos> = sources.to_vec();
+    let mut carry = decay;
+    for stage in 1..stages {
+        let rx = sources[0].0 + (target.0 - sources[0].0) * stage / stages;
+        let ry = top + rise * stage / stages;
+        // Z is interpolated between the endpoints, like X and Y - not parked in
+        // the riser field.
+        //
+        // The gate work list puts its relays at a fixed `RISER_Z0 + band`, which
+        // works because every one of its connections runs from a spine just
+        // south of the gate array to a stub just north of it, so the riser field
+        // is genuinely on the way. The register bank is the opposite case: it
+        // sits *behind* the gate array in Z, so a clock chain heading for a flop
+        // 200 blocks north was staged through relays 50 blocks south, and stage
+        // 3 had nowhere to go. Interpolating keeps every hop on the line between
+        // the two ends whichever way that line runs.
+        let band = (*chain % RELAY_BANDS as usize) as i32;
+        let rz = sources[0].2 + (target.2 - sources[0].2) * stage / stages + band * 3;
+        // Search outward in Z in both directions. The nominal site can land
+        // inside a flip-flop macro, which is 55 blocks deep, and a one-sided
+        // scan cannot always get clear of one.
+        let dzs = (0..32).flat_map(|k: i32| if k == 0 { vec![0] } else { vec![2 * k, -2 * k] });
+        // Take the first *comfortable* site, falling back to the roomiest of the
+        // first several usable ones.
+        //
+        // Taking the first merely-usable site is how reset - twenty-two chains
+        // leaving one lever for eleven flip-flops - strangled itself at stage 2:
+        // a site with the bare minimum of two approaches is fine until the route
+        // into it takes one, and then the next stage starts walled in. Taking
+        // the roomiest instead overcorrects, because the candidate list is
+        // ordered by distance from the nominal site and open space is furthest
+        // from the traffic: clk_n went out to the cramped western edge of the
+        // build, past its own lever, and stage 1 could not reach it. Near and
+        // adequate beats far and spacious.
+        const COMFY: usize = 6;
+        let mut best: Option<(usize, Pos)> = None;
+        let mut seen = 0;
+        for (dx, dy, dz) in dzs.flat_map(|dz| {
+            [0, 2, -2, 3, -3]
+                .into_iter()
+                .flat_map(move |dy| [0, 2, -2, 4, -4, 6, -6, 9, -9, 12, -12].map(move |dx| (dx, dy, dz)))
+        }) {
+            let c = (rx + dx, ry + dy, rz + dz);
+            if let Some(r) = router.relay_site_room(grid, c, net_id) {
+                if r >= COMFY {
+                    best = Some((r, c));
+                    break;
+                }
+                if best.is_none_or(|(b, _)| r > b) {
+                    best = Some((r, c));
+                }
+                seen += 1;
+                if seen >= 24 {
+                    break;
+                }
+            }
+        }
+        let site = best
+            .map(|(_, c)| c)
+            .ok_or_else(|| format!("no clear relay site near ({rx}, {ry}, {rz}) for net {net_id}"))?;
+        let (rin, rout) = stamp_relay(grid, site)?;
+        router.claim(rin, net_id);
+        router.claim(rout, net_id);
+        router.block(site);
+        router
+            .route(grid, net_id, &from, rin, bounds, material, carry)
+            .map_err(|e| format!("stage {stage} of {stages}: {e}"))?;
+        from = vec![rout];
+        carry = 0;
+    }
+    *chain += 1;
+    router.route(grid, net_id, &from, target, bounds, material, carry)
 }
 
 /// Assign every combinational signal a logic level: leaves at 0, each NOR one
@@ -296,7 +424,11 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         for (i, slot) in [&mut clk_lever, &mut clk_n_lever, &mut rst_lever].into_iter().enumerate() {
             let pos = (ctrl_x - i as i32 * 3, lever_y, GATE_Z - 4);
             stamp_lever(&mut grid, pos, Material::Clock, false)?;
-            let tap = (pos.0, pos.1, pos.2 + 1);
+            // Tap on the *north* side of the lever, towards the register bank.
+            // On the south side the distribution trunk's very first cell is the
+            // lever itself, so the trunk stopped at length zero and every clock
+            // and reset route was left trying to leave from a single dust cell.
+            let tap = (pos.0, pos.1, pos.2 - 1);
             grid.set((tap.0, tap.1 - 1, tap.2), Block::Solid(Material::Clock))?;
             grid.set(tap, Block::Dust { power: 0 })?;
             *slot = Some(tap);
@@ -330,7 +462,10 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     }
     for l in 1..=max_level {
         let Some(mut row) = by_level.remove(&l) else { continue };
-        row.sort_by_key(|&g| {
+        // Where each gate would *like* to sit: the mean X of whatever drives
+        // it. Gates with no placed driver get the left edge rather than a
+        // sentinel in the middle of the row.
+        let want_x = |g: Sig, placed: &HashMap<Sig, Placed>| -> i64 {
             let xs: Vec<i64> = net
                 .operands(g)
                 .iter()
@@ -342,19 +477,35 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                 })
                 .map(|x| x as i64)
                 .collect();
-            // Scaled mean, so ties break deterministically on gate id.
-            let bary = if xs.is_empty() {
-                i64::MAX / 2
+            if xs.is_empty() {
+                i64::MIN / 2
             } else {
-                xs.iter().sum::<i64>() * 1000 / xs.len() as i64
-            };
-            (bary, g)
-        });
-        let mut x = 0;
+                xs.iter().sum::<i64>() / xs.len() as i64
+            }
+        };
+        row.sort_by_key(|&g| (want_x(g, &placed), g));
+
+        // Place each gate *at* its barycenter, not merely in barycenter order.
+        //
+        // Ordering alone is not placement. Every row used to be packed from
+        // x = 0, so a level with three gates hugged the origin however far away
+        // its drivers were - and in `tick` that put a gate at x = 0 fed by a
+        // spine at x = 163, a connection crossing the entire build diagonally.
+        // With 141 such connections the router never got past the fifth.
+        //
+        // Sorted by desired X, a single left-to-right sweep places each gate at
+        // its wish or at the first free spot after its predecessor, whichever is
+        // further right. That is the classic linear-placement sweep: it keeps
+        // the ordering, never overlaps, and collapses to the old behaviour when
+        // every wish is at the origin.
+        let mut x = i32::MIN;
         for g in row {
+            let wish = want_x(g, &placed);
+            let at = if wish == i64::MIN / 2 { x.max(0) } else { (wish as i32).max(x) };
+            let at = at.max(0);
             let k = net.operands(g).len().max(1);
-            let cell = stamp_nor(&mut grid, (x, -l * LEVEL_H, GATE_Z), k)?;
-            x += cell.width + GATE_GAP;
+            let cell = stamp_nor(&mut grid, (at, -l * LEVEL_H, GATE_Z), k)?;
+            x = at + cell.width + GATE_GAP;
             widest = widest.max(x);
             placed.insert(g, Placed { cell });
         }
@@ -454,9 +605,17 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                 break;
             }
             grid.set((p.0, p.1 - 1, p.2), Block::Solid(Material::Wire))?;
-            grid.set(p, Block::Dust { power: 0 })?;
             router.claim(p, s);
-            cells.push(p);
+            if t % SPINE_REFRESH == 0 {
+                // A repeater reads from the side it faces, and the spine runs
+                // +Z, so it faces north back towards the driver. It is not a
+                // branch point - a route cannot leave from a repeater - so it is
+                // claimed but kept out of the source list.
+                grid.set(p, Block::Repeater { facing: Dir::North, delay: 1, powered: false })?;
+            } else {
+                grid.set(p, Block::Dust { power: 0 })?;
+                cells.push(p);
+            }
         }
         spine.insert(s, cells);
     }
@@ -580,15 +739,20 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     // Rips per connection, so two that keep evicting each other give up rather
     // than trade the same space forever.
     let mut rips: HashMap<(Sig, usize), u32> = HashMap::new();
+    // One index per staged connection, so the relay band allocator has something
+    // per-chain to key on.
+    let mut chain_seq: usize = 0;
     let mut done: Vec<(Sig, usize, Sig)> = Vec::new();
     while let Some((g, j, src)) = queue.pop_front() {
         let feed = stub_entry[&(g, j)];
         let sources = spine
             .get(&src)
             .ok_or_else(|| format!("signal {src} has no driver"))?;
-        // Worst case the branch leaves from the far end of the spine, so
-        // charge the planner for the whole thing.
-        let decay = sources.len() as i32 - 1;
+        // Worst case a branch leaves from the cell just before a refresh
+        // repeater, which is `SPINE_REFRESH - 1` blocks of decay - not the whole
+        // spine, which is what this used to charge and which a long spine cannot
+        // pay. See `SPINE_REFRESH`.
+        let decay = SPINE_REFRESH - 1;
 
         // Break a deep drop into stages, each landing on a relay.
         let top = sources[0].1;
@@ -604,7 +768,22 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         let span_x = (feed.0 - sources[0].0).abs();
         let vstages = if drop > MAX_DROP { (drop + MAX_DROP - 1) / MAX_DROP } else { 1 };
         let hstages = if span_x > MAX_HOP { (span_x + MAX_HOP - 1) / MAX_HOP } else { 1 };
-        let stages = vstages.max(hstages);
+        // Stage a *steep* connection too, however short it is.
+        //
+        // Dust descends one block of Y per block travelled horizontally, so a
+        // drop needs at least as much horizontal room as it has depth. Nothing
+        // guaranteed that: a gate barycentred directly beneath the flip-flop
+        // driving it sat four blocks away in Z with eleven levels to fall, and
+        // the only way down was a switchback that lands a wire above its own
+        // substrate. The router cannot build that and cannot say so - it reports
+        // a search that got within five blocks and gave up.
+        //
+        // Better placement makes this *more* common, not less, because putting a
+        // gate near its driver is exactly what removes the horizontal run the
+        // descent was using. One relay fixes it.
+        let span_h = span_x + (feed.2 - sources[0].2).abs();
+        let steep = if drop > span_h { 2 } else { 1 };
+        let stages = vstages.max(hstages).max(steep);
 
         let mut from: Vec<Pos> = sources.clone();
         let mut carry = decay;
@@ -628,7 +807,11 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         // hop then had to cross the whole excursion. A small per-chain jitter
         // breaks the remaining ties, and `relay_site_clear` moves anything that
         // still lands on a neighbour.
-        let slot = if stages > 1 {
+        let chain = chain_seq;
+        if stages > 1 {
+            chain_seq += 1;
+        }
+        let _slot = if stages > 1 {
             let key = *chain_x.first().unwrap_or(&feed.0);
             let s = riser_slot.entry(key).or_insert(0);
             let v = *s;
@@ -657,15 +840,23 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             // whose depth grows with the design - the old scheme put alu's
             // first chain at z=437 and left its final hop crossing the whole
             // excursion. Bands wrap, so Z stays bounded however deep the design.
-            // Band by stage index, wrapping. Deriving the band from the relay's
-            // own Y assumed every chain descends deep into the gate array; a
-            // shallow connection near the top gives a negative level, which
-            // wrapped to the far band and banished the relay 70 blocks away in
-            // Z from both of its endpoints. The stage index is always small and
-            // positive, still gives successive stages their own Z, and wraps so
-            // the excursion stays bounded however long the chain.
-            let band = (stage - 1).rem_euclid(RELAY_BANDS);
-            let rz = RISER_Z0 + band * RELAY_BAND_GAP + (slot % 2) * 4;
+            // Band by *chain*, not by stage index.
+            //
+            // Stage-index banding put every chain's first relay in band 0, and
+            // stage 1 is the commonest stage there is - most connections are two
+            // or three stages. So one band took the great majority of the relays
+            // in the design while five sat nearly empty.
+            //
+            // Banding by chain spreads first stages evenly instead. Stages within
+            // one chain still separate from each other, in X and Y, because both
+            // are interpolated from source to sink - which is what the stage-index
+            // scheme was really buying, and it is free.
+            //
+            // This is not the old per-chain allocator that put alu's first chain
+            // at z = 437: bands wrap, so the field's depth is fixed by
+            // RELAY_BANDS however many connections the design has.
+            let band = (chain % RELAY_BANDS as usize) as i32;
+            let rz = RISER_Z0 + band * RELAY_BAND_GAP + (stage % 2) * 4;
             // stamp_relay writes with grid.set and never consults keepout, so
             // the site has to be checked here or the relay can land touching
             // another net's wire - which electrically joins the two nets and is
@@ -674,10 +865,18 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             // near the nominal site and take the first clear one.
             // Search widely: chains no longer reserve their own Z, so a site
             // genuinely has to be found rather than assumed.
+            // Candidates vary in Y as well as X and Z. `ry` is an interpolation,
+            // not a requirement: a relay a couple of blocks above or below the
+            // nominal descent restores the signal just as well, and the next
+            // stage's route absorbs the difference. Pinning it exactly meant
+            // every chain with the same drop competed for one plane.
             let site = (0..48)
                 .flat_map(|dz| {
-                    [0, 2, -2, 4, -4, 6, -6, 9, -9, 12, -12].map(|dx| (rx + dx, ry, rz + dz))
+                    [0, 2, -2, 3, -3].into_iter().flat_map(move |dy| {
+                        [0, 2, -2, 4, -4, 6, -6, 9, -9, 12, -12].map(move |dx| (dx, dy, dz))
+                    })
                 })
+                .map(|(dx, dy, dz)| (rx + dx, ry + dy, rz + dz))
                 .find(|&c| router.relay_site_clear(&grid, c, src))
                 .ok_or_else(|| {
                     format!(
@@ -801,28 +1000,62 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     if !bank_flops.is_empty() {
         // A control lever drives every flop, so give each one a spine to branch
         // from rather than routing many nets out of a single dust cell.
-        let ctrl_spine = |grid: &mut Grid, router: &mut Router, tap: Pos, net_id: Sig| {
+        // The trunk runs *north*, the length of the bank, and is refreshed.
+        //
+        // It used to be five cells of dust running south, away from the bank -
+        // and every one of the clock, inverted-clock and reset routes had to
+        // leave from those five cells. Eleven flip-flops is forty-four such
+        // routes; the first few take the spine's exits and the rest report "no
+        // route from any of 6 sources" with the search exhausted rather than out
+        // of budget. Five cells of dust also die after fifteen blocks, so most
+        // of a bank two hundred deep was out of reach even in principle.
+        //
+        // Running the length of the bank instead gives every flip-flop a tap a
+        // few blocks from its own pads, which is what makes these the *easy*
+        // routes rather than the hardest ones in the build.
+        let ctrl_spine = |grid: &mut Grid, router: &mut Router, tap: Pos, net_id: Sig, reach: i32| {
             let mut cells = vec![tap];
             router.claim(tap, net_id);
-            for t in 1..=SPINE_LEN {
-                let p = (tap.0, tap.1, tap.2 + t);
+            for t in 1..=reach {
+                let p = (tap.0, tap.1, tap.2 - t);
                 if !grid.is_free(p) || !grid.is_free((p.0, p.1 - 1, p.2)) {
                     break;
                 }
                 let _ = grid.set((p.0, p.1 - 1, p.2), Block::Solid(Material::Clock));
-                let _ = grid.set(p, Block::Dust { power: 0 });
                 router.claim(p, net_id);
-                cells.push(p);
+                // A repeater faces the side it reads from, and this trunk runs
+                // -Z, so it faces south back towards the lever. Repeater cells
+                // are not branch points, so they stay out of the source list.
+                if t % SPINE_REFRESH == 0 {
+                    let _ = grid.set(
+                        p,
+                        Block::Repeater { facing: Dir::South, delay: 1, powered: false },
+                    );
+                } else {
+                    let _ = grid.set(p, Block::Dust { power: 0 });
+                    cells.push(p);
+                }
             }
             cells
         };
 
+        // Long enough to run past the deepest flip-flop's pads.
+        let reach = bank_flops
+            .iter()
+            .flat_map(|f| {
+                f.clk_feeds.iter().chain(f.clk_n_feeds.iter()).chain(f.clr_feeds.iter())
+            })
+            .map(|p| p.2)
+            .min()
+            .map(|zmin| (clk_lever.unwrap().2 - zmin + 8).max(SPINE_LEN))
+            .unwrap_or(SPINE_LEN);
+
         // Control nets get ids past the end of the signal space so they cannot
         // collide with a real signal's keepout.
         let base_net = net.sigs.len() as Sig;
-        let clk_src = ctrl_spine(&mut grid, &mut router, clk_lever.unwrap(), base_net);
-        let clkn_src = ctrl_spine(&mut grid, &mut router, clk_n_lever.unwrap(), base_net + 1);
-        let rst_src = ctrl_spine(&mut grid, &mut router, rst_lever.unwrap(), base_net + 2);
+        let clk_src = ctrl_spine(&mut grid, &mut router, clk_lever.unwrap(), base_net, reach);
+        let clkn_src = ctrl_spine(&mut grid, &mut router, clk_n_lever.unwrap(), base_net + 1, reach);
+        let rst_src = ctrl_spine(&mut grid, &mut router, rst_lever.unwrap(), base_net + 2, reach);
 
         for (i, f) in bank_flops.iter().enumerate() {
             // D: from whatever the netlist says drives this register.
@@ -832,34 +1065,55 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                 .cloned()
                 .or_else(|| source_of.get(&d_sig).map(|&p| vec![p]))
                 .ok_or_else(|| format!("flip-flop {i} D signal {d_sig} has no driver"))?;
-            let decay = sources.len() as i32 - 1;
+            // A spine tap costs at most one refresh interval; a bare Q port is a
+            // repeater and costs nothing.
+            let decay = if sources.len() > 1 { SPINE_REFRESH - 1 } else { 0 };
             router.claim(f.d_feeds[0], d_sig);
-            router
-                .route(&mut grid, d_sig, &sources, f.d_feeds[0], bounds, Material::Wire, decay)
-                .map_err(|e| format!("routing D into flip-flop {i}: {e}"))?;
+            staged_route(
+                &mut grid,
+                &mut router,
+                d_sig,
+                &sources,
+                f.d_feeds[0],
+                bounds,
+                Material::Wire,
+                decay,
+                &mut chain_seq,
+            )
+            .map_err(|e| format!("routing D into flip-flop {i}: {e}"))?;
 
             for (label, src, dst, id) in [
                 ("clk", &clk_src, f.clk_feeds[0], base_net),
                 ("clk_n", &clkn_src, f.clk_n_feeds[0], base_net + 1),
             ] {
                 router.claim(dst, id);
-                router
-                    .route(&mut grid, id, src, dst, bounds, Material::Clock, src.len() as i32 - 1)
-                    .map_err(|e| format!("routing {label} into flip-flop {i}: {e}"))?;
+                staged_route(
+                    &mut grid,
+                    &mut router,
+                    id,
+                    src,
+                    dst,
+                    bounds,
+                    Material::Clock,
+                    SPINE_REFRESH - 1,
+                    &mut chain_seq,
+                )
+                .map_err(|e| format!("routing {label} into flip-flop {i}: {e}"))?;
             }
             for (k, &clr) in f.clr_feeds.iter().enumerate() {
                 router.claim(clr, base_net + 2);
-                router
-                    .route(
-                        &mut grid,
-                        base_net + 2,
-                        &rst_src,
-                        clr,
-                        bounds,
-                        Material::Clock,
-                        rst_src.len() as i32 - 1,
-                    )
-                    .map_err(|e| format!("routing reset {k} into flip-flop {i}: {e}"))?;
+                staged_route(
+                    &mut grid,
+                    &mut router,
+                    base_net + 2,
+                    &rst_src,
+                    clr,
+                    bounds,
+                    Material::Clock,
+                    SPINE_REFRESH - 1,
+                    &mut chain_seq,
+                )
+                .map_err(|e| format!("routing reset {k} into flip-flop {i}: {e}"))?;
             }
         }
     }
@@ -887,9 +1141,9 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         output_lamps,
         levels: max_level as usize + 1,
         gates: gates.len(),
-        clk_lever: clk_lever.map(|t| (t.0, t.1, t.2 - 1)),
-        clk_n_lever: clk_n_lever.map(|t| (t.0, t.1, t.2 - 1)),
-        rst_lever: rst_lever.map(|t| (t.0, t.1, t.2 - 1)),
+        clk_lever: clk_lever.map(|t| (t.0, t.1, t.2 + 1)),
+        clk_n_lever: clk_n_lever.map(|t| (t.0, t.1, t.2 + 1)),
+        rst_lever: rst_lever.map(|t| (t.0, t.1, t.2 + 1)),
         flops: bank_flops.len(),
         gate_cells: placed
             .iter()
