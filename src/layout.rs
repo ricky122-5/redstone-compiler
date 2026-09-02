@@ -57,6 +57,25 @@ const SPINE_MAX: i32 = 24;
 /// whatever the spine's length, which leaves a route most of its budget and
 /// makes every tap live.
 const SPINE_REFRESH: i32 = 6;
+
+/// How much more horizontal room than vertical drop a single hop must have.
+///
+/// Dust descends one block of Y per block travelled, so the bare requirement is
+/// one horizontal block per level. That bare test - stage only when the drop
+/// *exceeds* the run - is what a six-flip-flop design failed on: a connection
+/// with an eleven-level drop and twelve blocks of horizontal room was left as
+/// one hop, and twelve blocks is a 92% grade. A staircase that steep has no flat
+/// cell for a repeater to sit on, so `plan_repeaters` refuses every path the
+/// search finds and the router burns its whole budget being told no. The
+/// failure reports open approaches and a search that got within a few blocks,
+/// which reads like congestion and is nothing of the kind.
+///
+/// The real requirement includes the flats: one per level, plus one every
+/// thirteen blocks to refresh the signal, plus room to approach the target from
+/// a sensible direction. Demanding twice the drop is a blunt way to say that,
+/// and it is on the right side of the tradeoff - an unnecessary relay costs two
+/// repeaters, while a missing one costs the whole route.
+const STEEP_SLACK: i32 = 2;
 /// Largest vertical drop a single route may attempt.
 ///
 /// Dust falls one block of Y per block of horizontal travel, and it cannot carry
@@ -99,6 +118,9 @@ pub struct Layout {
     pub clk_n_lever: Option<Pos>,
     pub rst_lever: Option<Pos>,
     pub flops: usize,
+    /// Every flip-flop's ports, so a harness can drive and read the bank
+    /// directly instead of inferring where its pads ended up.
+    pub flop_ports: Vec<crate::tech::DffPorts>,
     /// Where each NOR gate's signal ended up: its output dust and its input
     /// pads. Exposed so a placed circuit can be diffed against the netlist gate
     /// by gate - the only way to find *which* gate first disagrees, rather than
@@ -188,7 +210,7 @@ fn staged_route(
     // dust falls one block of Y per block travelled. Endpoints close together
     // but far apart vertically do not provide it; staging through a relay out in
     // open space does.
-    let steep = if rise.abs() > span_h { 2 } else { 1 };
+    let steep = if rise.abs() * STEEP_SLACK > span_h { 2 } else { 1 };
     let stages = vstages.max(hstages).max(steep).max(1);
 
     let mut from: Vec<Pos> = sources.to_vec();
@@ -794,8 +816,19 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         // gate near its driver is exactly what removes the horizontal run the
         // descent was using. One relay fixes it.
         let span_h = span_x + (feed.2 - sources[0].2).abs();
-        let steep = if drop > span_h { 2 } else { 1 };
+        let steep = if drop * STEEP_SLACK > span_h { 2 } else { 1 };
         let stages = vstages.max(hstages).max(steep);
+        // `OHMC_TRACE=1` prints the plan for every connection. Routing failures
+        // report the search's view - open approaches, expansions - which says
+        // nothing about *why* the connection was shaped the way it was; the
+        // plan is what usually turns out to be wrong.
+        if std::env::var("OHMC_TRACE").is_ok() {
+            eprintln!(
+                "conn g{g} in{j} <- net{src}: src0={:?} nsrc={} feed={feed:?} drop={drop} spanx={span_x} spanh={span_h} stages={stages}",
+                sources[0],
+                sources.len()
+            );
+        }
 
         let mut from: Vec<Pos> = sources.clone();
         let mut carry = decay;
@@ -1157,6 +1190,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         clk_n_lever: clk_n_lever.map(|t| (t.0, t.1, t.2 + 1)),
         rst_lever: rst_lever.map(|t| (t.0, t.1, t.2 + 1)),
         flops: bank_flops.len(),
+        flop_ports: bank_flops,
         gate_cells: placed
             .iter()
             .map(|(&sig, p)| (sig, (p.cell.out, p.cell.feeds.clone())))

@@ -360,6 +360,16 @@ impl SimState {
         self.pending.len()
     }
 
+    /// Which cells still have a transition scheduled, and what they are heading
+    /// for. A circuit that will not settle has a fixed set of these forever, and
+    /// they are the oscillator - reading them is far cheaper than sampling every
+    /// cell in the grid, which means recomputing the whole field every tick.
+    pub fn pending_cells(&self) -> Vec<(Pos, bool)> {
+        let mut v: Vec<(Pos, bool)> = self.pending.iter().map(|(&p, &(_, t))| (p, t)).collect();
+        v.sort();
+        v
+    }
+
     /// Drop every scheduled transition. Used when a probe forces a component
     /// into a chosen state and wants the circuit to react to that alone,
     /// without a stale schedule undoing it on the next tick.

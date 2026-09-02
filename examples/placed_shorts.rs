@@ -180,7 +180,9 @@ fn main() {
     let src = std::fs::read_to_string(&path).unwrap();
     let prog = parser::parse(&src).unwrap();
     let design = lower::lower_program(&prog).unwrap();
-    let net = bitblast::blast_combinational(&design).unwrap();
+    // Sequential designs have no combinational lowering; fall back the same way
+    // the compiler does, so this tool works on `tick` and `gcd` too.
+    let net = bitblast::blast_combinational(&design).unwrap_or_else(|_| bitblast::blast(&design));
     let lay = layout::build(&net).unwrap();
     let g = &lay.grid;
 

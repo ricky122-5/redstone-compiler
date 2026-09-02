@@ -100,7 +100,10 @@ const TURN_COST: i32 = 25;
 /// Cheapest a slope step can be, and what the heuristic charges for each level
 /// it still has to descend. Must not exceed the smallest value on `route`'s
 /// slope ladder or the bound stops being admissible.
-const SLOPE_FLOOR: i32 = 14;
+const SLOPE_FLOOR_DEFAULT: i32 = 14;
+fn slope_floor() -> i32 {
+    std::env::var("OHMC_SF").ok().and_then(|v| v.parse().ok()).unwrap_or(SLOPE_FLOOR_DEFAULT)
+}
 
 #[derive(PartialEq, Eq)]
 struct Frontier {
@@ -498,7 +501,7 @@ impl Router {
     fn heuristic(a: Pos, b: Pos) -> i32 {
         let horiz = (a.0 - b.0).abs() + (a.2 - b.2).abs();
         let vert = (a.1 - b.1).abs();
-        vert * SLOPE_FLOOR + (horiz - vert).max(0) * 10
+        vert * slope_floor() + (horiz - vert).max(0) * 10
     }
 
     /// Find a path from an existing wire node to a target cell.
