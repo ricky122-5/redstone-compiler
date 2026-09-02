@@ -271,6 +271,18 @@ cargo test        # 101 tests
 
 **Verified in actual Minecraft:**
 
+- **`examples/tick.ohm` runs.** 99 NOR gates, 11 flip-flops, 6 basic blocks,
+  61,898 blocks placed by a datapack into a stock server. Pulse the async clear,
+  hold the state reset for one clock, then work the two clock phases:
+
+  ```
+  go=0   lamp 0 for every cycle                     model: done=0
+  go=1   lamp 0 through cycle 6, 1 from cycle 7 on  model: done=1 after 7 cycles
+  ```
+
+  The golden model says seven cycles and the lamp lights on the seventh, then
+  holds - a real halt, not a glitch. This is a compiled program with a control
+  FSM and real registers executing in vanilla Minecraft.
 - `examples/invert.ohm` inverts correctly, all inputs, repeatably.
 - `examples/andgate.ohm` (3 NOR gates, crossing wires) matches its truth table
   on all 4 input combinations.
