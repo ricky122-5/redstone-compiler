@@ -166,6 +166,13 @@ FL_X2=$((BX + 16)); FL_Z2=$((BZ + 16))
 FL_CHUNKS=$(( ((FL_X2 + 48) / 16 + 1) * ((FL_Z2 + 48) / 16 + 1) ))
 echo "forceload -48 -48 $FL_X2 $FL_Z2 (~$FL_CHUNKS chunks)"
 [ "$FL_CHUNKS" -le 256 ] || { echo "circuit needs $FL_CHUNKS chunks, over the 256 forceload cap"; exit 1; }
+# A function stops after `maxCommandChainLength` commands and says nothing
+# about it. The default is 65536, and a placed design passes that easily -
+# `count.ohm` is 87226 setblock commands, so the last quarter of the build was
+# silently never placed. Because the emitter writes dust last, what went missing
+# was exactly the wiring, and the result looked like a dead circuit rather than
+# an unfinished one.
+send "gamerule maxCommandChainLength 10000000" 2
 send "forceload add -48 -48 $FL_X2 $FL_Z2" 2
 send "reload" 3
 send "execute positioned 0.0 0.0 0.0 run function ohm:circuit" 3

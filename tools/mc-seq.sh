@@ -60,6 +60,9 @@ CLKN=$(echo "$INFO"   | sed -n 's/.*clock_n lever at ~\([0-9-]*\) ~\([0-9-]*\) ~
 CLR=$(echo "$INFO"    | sed -n 's/.*reset   lever at ~\([0-9-]*\) ~\([0-9-]*\) ~\([0-9-]*\).*/\1 \2 \3/p')
 # The state vector, so a wrong lamp can be told from a stuck machine.
 QS=$(echo "$INFO"     | sed -n 's/^  state  q\[[0-9]*\] dust  at ~\([0-9-]*\) ~\([0-9-]*\) ~\([0-9-]*\).*/\1 \2 \3/p')
+# Where the clock and clear arrive at each register, so a frozen machine can be
+# traced to the trunk that failed rather than guessed at.
+FEEDS=$(echo "$INFO"  | sed -n 's/^  feed   \([a-z]*\)\[\([0-9]*\)\] dust  at ~\([0-9-]*\) ~\([0-9-]*\) ~\([0-9-]*\).*/\1\2 \3 \4 \5/p')
 SRST=$(echo "$INFO"   | sed -n 's/.*state reset lever at ~\([0-9-]*\) ~\([0-9-]*\) ~\([0-9-]*\).*/\1 \2 \3/p')
 for n in CLK CLKN CLR SRST; do
   eval "v=\$$n"
@@ -159,6 +162,25 @@ EOF
   i=$((i+1))
 done <<< "$QS"
 
+# The control feeds, reported with their actual power level rather than a bit.
+#
+# A frozen machine says only that something upstream died; the level at the pad
+# says whether the signal arrived at all, arrived weak, or arrived fine and was
+# ignored - three different faults that look identical from the lamps. Reported
+# as "missing" when the block is not dust at all, which is what an unsupported
+# wire looks like after Minecraft drops it.
+while read -r nm fx fy fz; do
+  [ -n "$nm" ] || continue
+  cat >> "$PK/data/ohm/function/probe.mcfunction" <<EOF
+execute unless block $fx $fy $fz minecraft:redstone_wire run say OHMC_FEED $nm missing
+EOF
+  for lvl in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    cat >> "$PK/data/ohm/function/probe.mcfunction" <<EOF
+execute if block $fx $fy $fz minecraft:redstone_wire[power=$lvl] run say OHMC_FEED $nm $lvl
+EOF
+  done
+done <<< "$FEEDS"
+
 # Three separate harness bugs in this project
 # have produced "logic mismatches" that were really the harness failing to drive
 # the circuit, so it verifies its own inputs rather than assuming they took.
@@ -203,6 +225,16 @@ import math
 span = max(abs($MINX), abs($MINZ), $BX, $BZ)
 print(min(32, span // 16 + 2))")
 echo "spawnChunkRadius $RAD (covers +/-$((RAD*16)) blocks)"
+# A function stops after `maxCommandChainLength` commands, and says nothing.
+#
+# The default is 65536. `count.ohm` is 87226 setblock commands, so the last
+# quarter of the build was silently never placed - and because the emitter
+# writes dust last, what went missing was exactly the wiring: every control
+# feed and every register\'s Q read back as "not redstone dust at all", the
+# machine sat frozen with a state vector that never changed, and it looked for
+# all the world like a dead circuit. `tick.ohm` is 60486 commands and fits,
+# which is why it validated in game and this did not.
+send "gamerule maxCommandChainLength 10000000" 2
 send "gamerule spawnChunkRadius $RAD" 2
 send "forceload add $MINX $MINZ $BX $BZ" 2
 send "reload" 3

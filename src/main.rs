@@ -194,6 +194,24 @@ fn run(args: &[String]) -> Result<(), String> {
                 let p = rel(f.q);
                 println!("  state  q[{i}] dust  at ~{} ~{} ~{}", p.0, p.1, p.2);
             }
+            // Where the clock and the clear actually arrive, per register.
+            //
+            // The state vector alone says a machine is frozen; it does not say
+            // why. `count.ohm` in game sits with every register high and never
+            // advances, while the same placed grid clocks correctly in the block
+            // simulator - so something on the way from the control levers to the
+            // bank is dying, and the only way to find out where is to read the
+            // signal at the far end. These are the pads the trunks deliver to.
+            for (i, f) in layout.flop_ports.iter().enumerate() {
+                if let Some(&c) = f.clk_feeds.first() {
+                    let p = rel(c);
+                    println!("  feed   clk[{i}] dust  at ~{} ~{} ~{}", p.0, p.1, p.2);
+                }
+                if let Some(&c) = f.clr_feeds.first() {
+                    let p = rel(c);
+                    println!("  feed   clr[{i}] dust  at ~{} ~{} ~{}", p.0, p.1, p.2);
+                }
+            }
         }
 
         if let Some(out_path) = out {
