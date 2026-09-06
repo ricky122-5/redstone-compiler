@@ -230,6 +230,25 @@ fn run(args: &[String]) -> Result<(), String> {
             let lines = text.lines().filter(|l| l.starts_with("setblock")).count();
             std::fs::write(&fn_path, &text).map_err(|e| format!("{fn_path}: {e}"))?;
             println!("wrote {fn_path}: {lines} setblock commands");
+            // Say so when the file is longer than a function is allowed to run.
+            //
+            // Minecraft stops a function after `maxCommandChainLength` commands
+            // and reports nothing at all. At the default of 65536 that silently
+            // truncated `count.ohm`, and since this emitter writes dust last,
+            // what went missing was the entire wiring layer - the built machine
+            // sat frozen and looked like a dead circuit rather than an
+            // unfinished one. It cost a long hunt through four layers of
+            // symptom, and the file itself knew the answer the whole time.
+            const DEFAULT_CHAIN: usize = 65536;
+            if lines > DEFAULT_CHAIN {
+                println!(
+                    "  note: {lines} commands exceeds the default \
+                     maxCommandChainLength of {DEFAULT_CHAIN}; run\n\
+                     \x20       `gamerule maxCommandChainLength {}`\n\
+                     \x20       before this function, or it stops partway with no error",
+                    lines.next_power_of_two().max(1 << 20)
+                );
+            }
 
             // Port coordinates in the same relative frame as the commands, so
             // the circuit can actually be driven and read once it is placed.
