@@ -1067,7 +1067,33 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             // at z = 437: bands wrap, so the field's depth is fixed by
             // RELAY_BANDS however many connections the design has.
             let band = (chain % RELAY_BANDS as usize) as i32;
-            let rz = RISER_Z0 + band * RELAY_BAND_GAP + (stage % 2) * 4;
+            // Bring the chain home in Z as well as in X and Y.
+            //
+            // Every relay used to sit at a fixed depth in the riser field, south
+            // of the gate array. That is on the way for the *first* hop - the
+            // driver's spine is south of the array too - but it means the last
+            // relay is still out in the field while its sink is a feed stub at
+            // z = -7, north of the array. The final hop then has to cross the
+            // whole excursion and the gate wall in one shot. On `gcd` that hop
+            // was 133 blocks with a single source, and the search crawled from
+            // 133 to 98 before giving up; it is the same error before and after
+            // the staging fix, because staging was never the part that was
+            // wrong.
+            //
+            // Interpolating Z toward the sink was tried before and reverted: it
+            // broke `add`. The reason is now visible. Converging in Z removes
+            // the horizontal run a hop was using to descend, which turns hops
+            // steeper than 1:1 - and an unbuildable grade surfaced as "path
+            // collides with itself", which reads like congestion and sent the
+            // investigation elsewhere. That failure mode is handled now: a hop
+            // measures its own grade and moves the relay out perpendicular by
+            // the deficit. So the convergence can come back.
+            //
+            // The band offset stays, and stays constant along a chain, so
+            // chains still separate from each other without any hop paying for
+            // it.
+            let z0 = RISER_Z0 + band * RELAY_BAND_GAP + (stage % 2) * 4;
+            let rz = z0 + (feed.2 - z0) * stage / stages;
             // stamp_relay writes with grid.set and never consults keepout, so
             // the site has to be checked here or the relay can land touching
             // another net's wire - which electrically joins the two nets and is
