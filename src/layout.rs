@@ -40,7 +40,7 @@ const STUB_LEN: i32 = 4;
 /// to leave from.
 const SPINE_LEN: i32 = 5;
 /// Longest an output spine may grow for a high-fanout net.
-const SPINE_MAX: i32 = 24;
+const SPINE_MAX: i32 = 80;
 /// How often a driver's output spine is refreshed by a repeater.
 ///
 /// A spine used to be plain dust however long it was, and the fan-out scaling

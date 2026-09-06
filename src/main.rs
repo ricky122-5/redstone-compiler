@@ -180,6 +180,20 @@ fn run(args: &[String]) -> Result<(), String> {
             if let Some(p) = layout.rst_lever.map(rel) {
                 println!("  reset   lever at ~{} ~{} ~{}  (async clear)", p.0, p.1, p.2);
             }
+            // Where each register's Q sits, so the state vector can be read in
+            // game and not merely inferred from the lamps.
+            //
+            // The lamps are the last thing in the machine: if they read wrong,
+            // the fault could be anywhere from the input levers to the output
+            // spine, and there is no way to tell which from outside. The block
+            // simulator prints Q every cycle for exactly this reason, and the
+            // in-game harness could not - so a disagreement between them had no
+            // common ground to be compared on. These make the two traces
+            // directly comparable, register by register and cycle by cycle.
+            for (i, f) in layout.flop_ports.iter().enumerate() {
+                let p = rel(f.q);
+                println!("  state  q[{i}] dust  at ~{} ~{} ~{}", p.0, p.1, p.2);
+            }
         }
 
         if let Some(out_path) = out {

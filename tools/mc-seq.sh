@@ -58,6 +58,8 @@ LAMPS=$(echo "$INFO"  | sed -n 's/.*lamp  at ~\([0-9-]*\) ~\([0-9-]*\) ~\([0-9-]
 CLK=$(echo "$INFO"    | sed -n 's/.*clock   lever at ~\([0-9-]*\) ~\([0-9-]*\) ~\([0-9-]*\).*/\1 \2 \3/p')
 CLKN=$(echo "$INFO"   | sed -n 's/.*clock_n lever at ~\([0-9-]*\) ~\([0-9-]*\) ~\([0-9-]*\).*/\1 \2 \3/p')
 CLR=$(echo "$INFO"    | sed -n 's/.*reset   lever at ~\([0-9-]*\) ~\([0-9-]*\) ~\([0-9-]*\).*/\1 \2 \3/p')
+# The state vector, so a wrong lamp can be told from a stuck machine.
+QS=$(echo "$INFO"     | sed -n 's/^  state  q\[[0-9]*\] dust  at ~\([0-9-]*\) ~\([0-9-]*\) ~\([0-9-]*\).*/\1 \2 \3/p')
 SRST=$(echo "$INFO"   | sed -n 's/.*state reset lever at ~\([0-9-]*\) ~\([0-9-]*\) ~\([0-9-]*\).*/\1 \2 \3/p')
 for n in CLK CLKN CLR SRST; do
   eval "v=\$$n"
@@ -120,7 +122,44 @@ EOF
   i=$((i+1))
 done <<< "$LAMPS"
 NLAMP=$i
-# Read the control levers back too. Three separate harness bugs in this project
+# Read the *data* levers back as well as the control ones.
+#
+# Only the control levers were verified, which left the one input that actually
+# distinguishes one test case from another completely unchecked. If a data lever
+# silently fails to take, every case computes whatever the default input is and
+# the sweep reports a uniform wrong answer - which looks exactly like a broken
+# circuit and is not. This project has lost whole debugging cycles to precisely
+# that, four times in the `add2` hunt alone, so nothing that drives the circuit
+# goes unverified.
+i=0
+while read -r lx ly lz; do
+  [ -n "$lx" ] || continue
+  cat >> "$PK/data/ohm/function/probe.mcfunction" <<EOF
+execute if block $lx $ly $lz minecraft:lever[powered=true] run say OHMC_IN $i 1
+execute if block $lx $ly $lz minecraft:lever[powered=false] run say OHMC_IN $i 0
+execute unless block $lx $ly $lz minecraft:lever run say OHMC_IN $i missing
+EOF
+  i=$((i+1))
+done <<< "$LEVERS"
+
+# The state vector, register by register.
+#
+# A lamp that reads wrong could be anything from the input levers to the output
+# spine, and from outside the machine there is no way to tell which. The block
+# simulator prints Q every cycle for exactly that reason; without the same trace
+# here, a disagreement between simulator and game has no common ground to be
+# compared on. `power=0` on the Q dust means the register is clear.
+i=0
+while read -r qx qy qz; do
+  [ -n "$qx" ] || continue
+  cat >> "$PK/data/ohm/function/probe.mcfunction" <<EOF
+execute if block $qx $qy $qz minecraft:redstone_wire[power=0] run say OHMC_Q $i 0
+execute unless block $qx $qy $qz minecraft:redstone_wire[power=0] run say OHMC_Q $i 1
+EOF
+  i=$((i+1))
+done <<< "$QS"
+
+# Three separate harness bugs in this project
 # have produced "logic mismatches" that were really the harness failing to drive
 # the circuit, so it verifies its own inputs rather than assuming they took.
 for nm in CLK CLKN CLR SRST; do
@@ -265,6 +304,8 @@ nlamp, cases = int(sys.argv[1]), int(sys.argv[2])
 log = open("server.log", encoding="utf8", errors="replace").read()
 runs, cur, cyc = {}, None, None
 ctl = {}
+drove = {}
+qvec = {}
 for line in log.splitlines():
     m = re.search(r"OHMC_INPUT (\d+)", line)
     if m:
@@ -278,15 +319,41 @@ for line in log.splitlines():
     m = re.search(r"OHMC_CTL (\w+) (\S+)", line)
     if m and cur is not None and cyc is not None:
         ctl.setdefault((cur, cyc), {})[m.group(1)] = m.group(2)
+    m = re.search(r"OHMC_IN (\d+) (\S+)", line)
+    if m and cur is not None and cyc is not None:
+        drove.setdefault((cur, cyc), {})[int(m.group(1))] = m.group(2)
+    m = re.search(r"OHMC_Q (\d+) ([01])", line)
+    if m and cur is not None and cyc is not None:
+        qvec.setdefault((cur, cyc), {})[int(m.group(1))] = int(m.group(2))
 
 for v in sorted(runs):
+    # What the circuit was actually driven with, read back off the levers.
+    #
+    # Printed before the answer, and checked against the value the sweep asked
+    # for, because a lever that silently failed to take makes every case compute
+    # the same wrong thing - indistinguishable from a logic fault by looking at
+    # the lamps alone.
+    seen = set()
+    for (rv, _c), bits in drove.items():
+        if rv == v:
+            seen.add(sum(int(b) << i for i, b in bits.items() if b in ("0", "1")))
+    if not seen:
+        print(f"input {v}: [HARNESS: no lever readback]")
+    elif seen != {v}:
+        print(f"input {v}: [HARNESS: asked for {v}, levers read back {sorted(seen)}]")
     print(f"input {v}:")
     prev = None
     for c in sorted(runs[v]):
         bits = runs[v][c]
         val = sum(bits.get(i, 0) << i for i in range(nlamp))
+        q = qvec.get((v, c), {})
+        qs = "".join(str(q[k]) for k in sorted(q)) if q else "?"
         if val != prev:
-            print(f"   cycle {c:>3}: lamps = {val}")
+            print(f"   cycle {c:>3}: lamps = {val}   Q={qs}")
             prev = val
-    print(f"   final: {prev}")
+    # The last state vector, so a machine that never moved is obvious even when
+    # the lamps happen to read the right answer.
+    last_c = max(runs[v]) if runs[v] else None
+    lq = qvec.get((v, last_c), {})
+    print(f"   final: {prev}   Q={''.join(str(lq[k]) for k in sorted(lq)) if lq else '?'}")
 PYEOF
