@@ -302,10 +302,21 @@ cargo test        # 101 tests
 - **Straight-line programs compile to placed, simulated, loadable redstone**,
   up to a few dozen gates. Inverters, AND/OR/XOR, 3-input majority and XOR all
   place and are verified by simulating the emitted blocks.
-- **Programs with a control FSM place, clock and compute.** `tick.ohm` - 99
-  gates, 11 flip-flops, 6 basic blocks - resets, runs its state machine, halts
-  on the cycle the golden model predicts, and produces the right answer for both
-  inputs. `examples/seq_settle.rs` walks a ladder of synthetic sequential designs
+- **Programs with a control FSM place, clock and compute in unmodified
+  Minecraft.** `count.ohm` - 165 NOR gates, 15 flip-flops, 6 basic blocks, a
+  two-bit input and a two-bit output - resets, runs its state machine, halts on
+  the cycle the golden model predicts, and returns the right answer for every
+  input:
+
+      n=0: levers read back 0, lamps c=0, want 0
+      n=1: levers read back 1, lamps c=1, want 1
+      n=2: levers read back 2, lamps c=2, want 2
+      n=3: levers read back 3, lamps c=3, want 3
+
+  The state vector matches the block simulator register for register and
+  transition for transition, so this is the whole machine agreeing, not just the
+  lamps landing on the right value. `tick.ohm` (99 gates, 11 flip-flops) does the
+  same for its single input. `examples/seq_settle.rs` walks a ladder of synthetic sequential designs
   from one flip-flop up to eleven flops and 121 gates; every one places *and
   settles*.
 
