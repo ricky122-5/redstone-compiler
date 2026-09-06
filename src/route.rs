@@ -643,15 +643,33 @@ impl Router {
     /// cannot see this; catching it here lets `route` retry with a different
     /// shape instead of emitting a circuit that is subtly disconnected.
     fn first_conflict(path: &[Pos]) -> Option<Pos> {
+        // Deterministic column order.
+        //
+        // This built a HashMap of columns and reported whichever conflict its
+        // iterator reached first. Rust seeds that hasher per process, so the
+        // cell `route` barred in `scratch` before retrying differed run to run:
+        // two compiles of `count.ohm` took different retry paths and failed in
+        // different places. Unreproducible routing failures are the expensive
+        // kind to debug.
+        //
+        // Sorting the keys fixes that while keeping the original choice of
+        // cell - the upper of the closest conflicting pair. That choice is
+        // load-bearing: reporting the *lower* one instead (the obvious rewrite,
+        // walking the path in order) barred the other end of every conflict and
+        // cost `three_input_logic_lays_out_and_runs`, a thirteen-connection
+        // design that had always placed.
         let mut columns: HashMap<(i32, i32), Vec<i32>> = HashMap::new();
         for &p in path {
             columns.entry((p.0, p.2)).or_default().push(p.1);
         }
-        for (&(x, z), ys) in columns.iter_mut() {
+        let mut keys: Vec<(i32, i32)> = columns.keys().copied().collect();
+        keys.sort_unstable();
+        for k in keys {
+            let ys = columns.get_mut(&k).expect("key came from this map");
             ys.sort_unstable();
             for w in ys.windows(2) {
                 if w[1] - w[0] < 3 {
-                    return Some((x, w[1], z));
+                    return Some((k.0, w[1], k.1));
                 }
             }
         }

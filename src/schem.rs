@@ -46,7 +46,18 @@ impl Schematic {
         palette.push("minecraft:air".to_string());
 
         let mut data = vec![0u32; width * height * length];
-        for (&p, &b) in grid.iter() {
+        // Sorted by position, the same way `structure.rs` does it and for the
+        // same reason: two runs of the compiler must produce byte-identical
+        // files. The palette is built in the order blocks are first seen, and
+        // iterating the grid's `HashMap` made that order a fresh coin flip each
+        // process - so three compiles of `add2.ohm` gave three different
+        // schematics of the *same circuit*. The blocks were identical; only the
+        // palette numbering moved. That is harmless in game and ruinous for
+        // debugging, because it makes diffing two builds impossible and hides
+        // whether a change altered anything at all.
+        let mut cells: Vec<_> = grid.iter().map(|(&p, &b)| (p, b)).collect();
+        cells.sort_by_key(|&(p, _)| (p.1, p.2, p.0));
+        for (p, b) in cells {
             if b == Block::Air {
                 continue;
             }

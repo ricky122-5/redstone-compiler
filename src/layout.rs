@@ -233,6 +233,11 @@ fn staged_route(
     // worse - it puts relays in space other nets need, and cost three of twelve
     // designs on the sequential ladder.
 
+    if std::env::var("OHMC_STAGE").is_ok() {
+        eprintln!(
+            "staged net{net_id} anchor={anchor:?} target={target:?} rise={rise} span_x={span_x} span_h={span_h} stages={stages} (v{vstages} h{hstages} steep{steep})"
+        );
+    }
     let mut from: Vec<Pos> = sources.to_vec();
     let mut carry = decay;
     for stage in 1..stages {
@@ -250,7 +255,57 @@ fn staged_route(
         // 3 had nowhere to go. Interpolating keeps every hop on the line between
         // the two ends whichever way that line runs.
         let band = (*chain % RELAY_BANDS as usize) as i32;
-        let rz = anchor.2 + (target.2 - anchor.2) * stage / stages + band * 3;
+        let mut rx = rx;
+        let mut rz = anchor.2 + (target.2 - anchor.2) * stage / stages + band * 3;
+
+        // Buy each hop the horizontal room its grade needs.
+        //
+        // Dust descends one block of Y per block travelled, so a hop with less
+        // horizontal run than vertical drop has no buildable shape at all. The
+        // router still finds *a* path - a switchback - and `first_conflict`
+        // rejects it, so the failure surfaces as "path collides with itself" on
+        // a 16-block hop with nine open approaches, which reads like congestion
+        // and is not.
+        //
+        // Interpolating the chain keeps the *average* grade of the connection,
+        // and that average is usually fine; what goes wrong is a single hop. The
+        // band offset above is the main culprit: it shifts every relay equally,
+        // so it cancels between stages, but stage 1's predecessor is the anchor,
+        // which carries no offset - so the first hop absorbs the whole of it. In
+        // `count` that turned an 11-block step toward the target into a 4-block
+        // step away from it, leaving 7 blocks of run for a 10-block climb.
+        //
+        // The fix is local and exact: measure this hop, and if it is steeper
+        // than 1:1 move the relay *perpendicular* to the line by the deficit.
+        // Perpendicular rather than along it, because going out and coming back
+        // buys room for the next hop too, where extending along the line would
+        // just borrow it from that hop instead.
+        //
+        // This is deliberately not the "push the whole chain off the line"
+        // scheme that was tried and measured worse - that paid the detour on
+        // every hop of every connection, and cost three of twelve designs on the
+        // sequential ladder. Here 135 of `count`'s 136 hops are already fine and
+        // are left exactly where they were; only the one that cannot be built
+        // moves.
+        {
+            let prev = from[0];
+            let dv = (ry - prev.1).abs();
+            let dh = (rx - prev.0).abs() + (rz - prev.2).abs();
+            // One spare block, so a hop is not merely buildable but has a flat
+            // cell to land a repeater on.
+            let need = dv + 1 - dh;
+            if need > 0 {
+                // Offset across the direction of travel: if the hop is mostly a
+                // Z move, widen it in X, and vice versa.
+                if (rz - prev.2).abs() >= (rx - prev.0).abs() {
+                    let away = if rx >= prev.0 { 1 } else { -1 };
+                    rx += need * away;
+                } else {
+                    let away = if rz >= prev.2 { 1 } else { -1 };
+                    rz += need * away;
+                }
+            }
+        }
         // Search outward in Z in both directions. The nominal site can land
         // inside a flip-flop macro, which is 55 blocks deep, and a one-sided
         // scan cannot always get clear of one.
@@ -276,6 +331,20 @@ fn staged_route(
                 .flat_map(move |dy| [0, 2, -2, 4, -4, 6, -6, 9, -9, 12, -12].map(move |dx| (dx, dy, dz)))
         }) {
             let c = (rx + dx, ry + dy, rz + dz);
+            // Reject a candidate that re-steepens the hop.
+            //
+            // The correction above is applied to the *nominal* site, but this
+            // search is free to move the relay up to sixty blocks in Z and a
+            // dozen in X looking for room - which can hand back the horizontal
+            // run the correction just bought, and put us right back at an
+            // unbuildable grade. Grade is a hard physical constraint, not a
+            // preference, so it filters candidates rather than ranking them.
+            let prev = from[0];
+            let dv = (c.1 - prev.1).abs();
+            let dh = (c.0 - prev.0).abs() + (c.2 - prev.2).abs();
+            if dv + 1 > dh {
+                continue;
+            }
             if let Some(r) = router.relay_site_room(grid, c, net_id) {
                 if r >= COMFY {
                     best = Some((r, c));
@@ -293,6 +362,13 @@ fn staged_route(
         let site = best
             .map(|(_, c)| c)
             .ok_or_else(|| format!("no clear relay site near ({rx}, {ry}, {rz}) for net {net_id}"))?;
+        if std::env::var("OHMC_STAGE").is_ok() {
+            let f = from[0];
+            let dh = (site.0 - f.0).abs() + (site.2 - f.2).abs();
+            let dv = (site.1 - f.1).abs();
+            eprintln!("  stage {stage}: nominal ({rx},{ry},{rz}) site {site:?}  hop dh={dh} dv={dv}{}",
+                if dv > dh { "  << STEEPER THAN 1:1" } else { "" });
+        }
         let (rin, rout) = stamp_relay(grid, site)?;
         router.claim(rin, net_id);
         router.claim(rout, net_id);
@@ -1488,6 +1564,40 @@ mod tests {
     /// inverted output - and it cannot be placed at all without treating Q as
     /// both a source and a sink.
     #[test]
+    /// The same netlist must place to the same blocks, every time.
+    ///
+    /// It did not. `Router::first_conflict` reported whichever self-collision a
+    /// `HashMap` iterator reached first, and Rust seeds that hasher per process,
+    /// so the cell `route` barred before retrying differed run to run. Two
+    /// compiles of `count.ohm` took different retry paths and failed in
+    /// different places - which makes a routing failure unreproducible, and
+    /// unreproducible failures are the expensive kind.
+    ///
+    /// Placed twice in one process, so a difference is real nondeterminism
+    /// rather than a rebuild or an environment change. A netlist with feedback
+    /// and a register bank, because those are the paths that stage and retry.
+    #[test]
+    fn placement_is_deterministic() {
+        let build_once = || {
+            let mut net = Netlist::new();
+            let (idx, q) = net.add_dff("r");
+            let nq = net.nor(&[q]);
+            let g2 = net.nor(&[nq, q]);
+            net.set_dff_d(idx, g2);
+            net.outputs.push(("q".into(), vec![q]));
+            let layout = build(&net).expect("must place");
+            let mut cells: Vec<(Pos, String)> =
+                layout.grid.iter().map(|(&p, b)| (p, format!("{b:?}"))).collect();
+            cells.sort();
+            cells
+        };
+        let a = build_once();
+        let b = build_once();
+        assert!(!a.is_empty(), "placement produced no blocks");
+        assert_eq!(a.len(), b.len(), "two placements of one netlist differ in block count");
+        assert!(a == b, "two placements of one netlist differ block for block");
+    }
+
     fn sequential_netlists_place() {
         let mut net = Netlist::new();
         let (idx, q) = net.add_dff("r");
