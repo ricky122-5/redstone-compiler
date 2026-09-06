@@ -71,9 +71,15 @@ pub fn blast_combinational(d: &Design) -> Result<Netlist, String> {
 
 impl<'d> Blaster<'d> {
     fn new(d: &'d Design) -> Blaster<'d> {
+        // Carry the source-level input port names into the netlist here rather
+        // than at either entry point, so the sequential and combinational paths
+        // cannot drift apart - which they did: `blast` had them and
+        // `blast_combinational` did not, so `add2.ohm` still reported `port0`.
+        let mut net = Netlist::new();
+        net.input_names = d.inputs.iter().map(|p| p.name.clone()).collect();
         Blaster {
             d,
-            net: Netlist::new(),
+            net,
             reg_q: Vec::new(),
             reg_dff: Vec::new(),
             state_q: Vec::new(),

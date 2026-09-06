@@ -594,49 +594,98 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     for &g in &gates {
         by_level.entry(level[g as usize]).or_default().push(g);
     }
-    for l in 1..=max_level {
-        let Some(mut row) = by_level.remove(&l) else { continue };
-        // Where each gate would *like* to sit: the mean X of whatever drives
-        // it. Gates with no placed driver get the left edge rather than a
-        // sentinel in the middle of the row.
-        let want_x = |g: Sig, placed: &HashMap<Sig, Placed>| -> i64 {
-            let xs: Vec<i64> = net
-                .operands(g)
-                .iter()
-                .filter_map(|&s| {
-                    placed
-                        .get(&s)
-                        .map(|p: &Placed| p.cell.out.0)
-                        .or_else(|| source_of.get(&s).map(|p| p.0))
-                })
-                .map(|x| x as i64)
-                .collect();
-            if xs.is_empty() {
-                i64::MIN / 2
-            } else {
-                xs.iter().sum::<i64>() / xs.len() as i64
-            }
-        };
-        row.sort_by_key(|&g| (want_x(g, &placed), g));
+    // Consumers of each signal, so a gate can drift toward what it feeds and
+    // not only toward what feeds it.
+    let mut consumers: HashMap<Sig, Vec<Sig>> = HashMap::new();
+    for &g in &gates {
+        for &o in net.operands(g).iter() {
+            consumers.entry(o).or_default().push(g);
+        }
+    }
 
-        // Place each gate *at* its barycenter, not merely in barycenter order.
-        //
-        // Ordering alone is not placement. Every row used to be packed from
-        // x = 0, so a level with three gates hugged the origin however far away
-        // its drivers were - and in `tick` that put a gate at x = 0 fed by a
-        // spine at x = 163, a connection crossing the entire build diagonally.
-        // With 141 such connections the router never got past the fifth.
-        //
-        // Sorted by desired X, a single left-to-right sweep places each gate at
-        // its wish or at the first free spot after its predecessor, whichever is
-        // further right. That is the classic linear-placement sweep: it keeps
-        // the ordering, never overlaps, and collapses to the old behaviour when
-        // every wish is at the origin.
-        let mut x = i32::MIN;
+    // Decide every gate's X before stamping any of them.
+    //
+    // Placement used to happen inside the stamping loop, which forced it to be
+    // a single sweep from the shallowest level down - and a single sweep can
+    // only look at drivers, because consumers live on deeper levels and have not
+    // been placed yet. So a gate was pulled toward its inputs and never toward
+    // its outputs, and a signal read by gates far to the right stayed on the
+    // left with a long wire across the build.
+    //
+    // Separating the arithmetic from the stamping makes a second pass possible:
+    // pass one places on drivers alone, exactly as before, and pass two re-places
+    // knowing where the consumers landed. Two passes rather than iterating to
+    // convergence, because this is a heuristic either way and the second pass is
+    // where nearly all of the improvement is.
+    let cell_width = |g: Sig| ((net.operands(g).len().max(1) as i32) - 1) * 2 + 1;
+    let mut at_x: HashMap<Sig, i32> = HashMap::new();
+    for pass in 0..2 {
+        for l in 1..=max_level {
+            let Some(row) = by_level.get(&l) else { continue };
+            let mut row = row.clone();
+
+            // Where a gate would like to sit: the mean X of its neighbours in
+            // the netlist. Drivers always; consumers too, once pass one has put
+            // them somewhere.
+            let wish = |g: Sig, at_x: &HashMap<Sig, i32>| -> Option<i64> {
+                let mut xs: Vec<i64> = net
+                    .operands(g)
+                    .iter()
+                    .filter_map(|&sig| {
+                        at_x.get(&sig).copied().or_else(|| source_of.get(&sig).map(|p| p.0))
+                    })
+                    .map(|x| x as i64)
+                    .collect();
+                if pass > 0 {
+                    xs.extend(
+                        consumers
+                            .get(&g)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|c| at_x.get(c).copied())
+                            .map(|x| x as i64),
+                    );
+                }
+                if xs.is_empty() {
+                    None
+                } else {
+                    Some(xs.iter().sum::<i64>() / xs.len() as i64)
+                }
+            };
+
+            row.sort_by_key(|&g| (wish(g, &at_x).unwrap_or(i64::MIN / 2), g));
+
+            // Place each gate *at* its barycenter, not merely in barycenter
+            // order. Ordering alone is not placement: every row used to be
+            // packed from x = 0, so a level with three gates hugged the origin
+            // however far away its drivers were - and in `tick` that put a gate
+            // at x = 0 fed by a spine at x = 163, a connection crossing the
+            // entire build diagonally. With 141 such connections the router
+            // never got past the fifth.
+            //
+            // Sorted by desired X, a single left-to-right sweep places each gate
+            // at its wish or at the first free spot after its predecessor,
+            // whichever is further right. The classic linear-placement sweep: it
+            // keeps the ordering, never overlaps, and collapses to the old
+            // behaviour when every wish is at the origin.
+            let mut x = 0;
+            for g in row {
+                let at = wish(g, &at_x).map_or(x, |w| (w as i32).max(x)).max(0);
+                at_x.insert(g, at);
+                x = at + cell_width(g) + GATE_GAP;
+            }
+        }
+    }
+
+    for l in 1..=max_level {
+        let Some(row) = by_level.get(&l) else { continue };
+        // Stamped in X order so the grid is built left to right, and so a row's
+        // cells cannot overlap even if the sweep above ever regressed.
+        let mut row = row.clone();
+        row.sort_by_key(|&g| (at_x.get(&g).copied().unwrap_or(0), g));
+        let mut x = 0;
         for g in row {
-            let wish = want_x(g, &placed);
-            let at = if wish == i64::MIN / 2 { x.max(0) } else { (wish as i32).max(x) };
-            let at = at.max(0);
+            let at = at_x.get(&g).copied().unwrap_or(0).max(x);
             let k = net.operands(g).len().max(1);
             let cell = stamp_nor(&mut grid, (at, -l * LEVEL_H, GATE_Z), k)?;
             x = at + cell.width + GATE_GAP;
@@ -1277,7 +1326,14 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     for p in ports {
         let mut v = by_port.remove(&p).unwrap();
         v.sort_by_key(|&(b, _)| b);
-        input_levers.push((format!("port{p}"), v.into_iter().map(|(_, p)| p).collect()));
+        // The source-level port name where the netlist knows it, so the
+        // reported levers can be driven by name from outside the compiler.
+        let name = net
+            .input_names
+            .get(p as usize)
+            .cloned()
+            .unwrap_or_else(|| format!("port{p}"));
+        input_levers.push((name, v.into_iter().map(|(_, p)| p).collect()));
     }
 
     Ok(Layout {

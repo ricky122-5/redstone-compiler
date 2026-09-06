@@ -44,6 +44,14 @@ pub struct Netlist {
     pub sigs: Vec<Src>,
     hash: HashMap<Src, Sig>,
     pub dffs: Vec<Dff>,
+    /// Input port names, indexed by the `port` field of [`Src::Input`].
+    ///
+    /// Outputs have carried their source-level name all along; inputs did not,
+    /// so everything downstream had to call them `port0`, `port1`. That is fine
+    /// until something outside the compiler needs to drive them: the in-game
+    /// harness has to pass `n=2` to the golden model to compare against, and
+    /// with only an index to go on it hardcoded a guess.
+    pub input_names: Vec<String>,
     /// Output ports, least-significant bit first.
     pub outputs: Vec<(String, Vec<Sig>)>,
     /// Asserted when the machine has halted.

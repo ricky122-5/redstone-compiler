@@ -229,17 +229,34 @@ wait $SRV 2>/dev/null
 
 echo
 echo "=== observed in Minecraft vs. the golden model ==="
+# Build the model's arguments from the *reported port names*, not a guess.
+#
+# This used to pass `go=$v` unconditionally, which happened to be right for
+# `tick.ohm` and is wrong for everything else - `count.ohm`'s port is `n`, and
+# the model simply errored out, leaving the run with nothing to compare against.
+# The compiler now prints each lever as `input NAME[bit]`, so the names and the
+# bit widths can both be read straight off it, and a value is split across ports
+# in the same lever order the sweep drives them.
+PORTS=$(echo "$INFO" | sed -n 's/^  input  \([A-Za-z_][A-Za-z0-9_]*\)\[\([0-9]*\)\].*/\1 \2/p')
 for v in $(seq 0 $((CASES-1))); do
-  echo "--- input $v ---"
-  IN=$(python3 -c "
-import sys
-names='''$(echo "$INFO" | sed -n 's/^  ports.*//p')'''
-print()" 2>/dev/null)
-  "$OHMC" "$OHM" --run "$(python3 -c "
-import re
-info='''$INFO'''
-# One port per lever bit is the common case for these examples.
-print('go=$v' if 'go' in info or True else '')" )" 2>/dev/null | sed 's/^/  model: /'
+  ARGS=$(python3 - "$v" <<PYP
+import sys, collections
+v = int(sys.argv[1])
+widths = collections.OrderedDict()
+for line in """$PORTS""".strip().splitlines():
+    if not line.strip():
+        continue
+    name, bit = line.split()
+    widths[name] = max(widths.get(name, 0), int(bit) + 1)
+parts, shift = [], 0
+for name, w in widths.items():
+    parts.append(f"{name}={(v >> shift) & ((1 << w) - 1)}")
+    shift += w
+print(",".join(parts))
+PYP
+)
+  echo "--- input $v  ($ARGS) ---"
+  "$OHMC" "$OHM" --run "$ARGS" 2>&1 | sed 's/^/  model: /'
 done
 
 python3 - "$NLAMP" "$CASES" <<'PYEOF'
