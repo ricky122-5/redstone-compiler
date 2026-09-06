@@ -1093,7 +1093,39 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             // chains still separate from each other without any hop paying for
             // it.
             let z0 = RISER_Z0 + band * RELAY_BAND_GAP + (stage % 2) * 4;
-            let rz = z0 + (feed.2 - z0) * stage / stages;
+            let mut rx = rx;
+            let mut rz = z0 + (feed.2 - z0) * stage / stages;
+
+            // Buy each hop the horizontal room its grade needs - the same rule
+            // `staged_route` applies to the register bank's wiring.
+            //
+            // Only the bank had it, and that was an oversight rather than a
+            // decision: nothing about a gate connection makes it exempt from
+            // physics. Dust falls one block of Y per block travelled, so a hop
+            // with less horizontal run than vertical drop has no buildable shape
+            // - and the Z convergence above makes that *more* likely, not less,
+            // because converging toward the sink is exactly what removes the Z
+            // run a hop was descending across. `gcd` said so directly: "route
+            // ran 13 blocks with no flat run to hold a repeater", which is a
+            // pure staircase with nowhere to refresh the signal.
+            {
+                let prev = from[0];
+                let dv = (ry - prev.1).abs();
+                let dh = (rx - prev.0).abs() + (rz - prev.2).abs();
+                // One spare block, so the hop is not merely buildable but has a
+                // flat cell to land a repeater on.
+                let need = dv + 1 - dh;
+                if need > 0 {
+                    // Across the direction of travel: out and back buys room for
+                    // the next hop too, where extending along the line would
+                    // borrow it from that hop instead.
+                    if (rz - prev.2).abs() >= (rx - prev.0).abs() {
+                        rx += need * if rx >= prev.0 { 1 } else { -1 };
+                    } else {
+                        rz += need * if rz >= prev.2 { 1 } else { -1 };
+                    }
+                }
+            }
             // stamp_relay writes with grid.set and never consults keepout, so
             // the site has to be checked here or the relay can land touching
             // another net's wire - which electrically joins the two nets and is
@@ -1114,6 +1146,17 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                     })
                 })
                 .map(|(dx, dy, dz)| (rx + dx, ry + dy, rz + dz))
+                // A candidate that re-steepens the hop is rejected outright.
+                // The search may move a relay dozens of blocks looking for room,
+                // which can hand back the horizontal run the correction above
+                // just bought. Grade is physics, not preference, so it filters
+                // rather than ranks.
+                .filter(|&c| {
+                    let prev = from[0];
+                    let dv = (c.1 - prev.1).abs();
+                    let dh = (c.0 - prev.0).abs() + (c.2 - prev.2).abs();
+                    dv + 1 <= dh
+                })
                 .find(|&c| router.relay_site_clear(&grid, c, src))
                 .ok_or_else(|| {
                     format!(
