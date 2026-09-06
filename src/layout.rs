@@ -92,7 +92,7 @@ const MAX_HOP: i32 = 48;
 /// How many Z bands relays are spread over before wrapping.
 const RELAY_BANDS: i32 = 6;
 /// Z between adjacent relay bands.
-const RELAY_BAND_GAP: i32 = 10;
+const RELAY_BAND_GAP: i32 = 6;
 
 /// Z of the first relay stage, south of every gate spine.
 const RISER_Z0: i32 = 14;
@@ -340,9 +340,15 @@ fn staged_route(
             // unbuildable grade. Grade is a hard physical constraint, not a
             // preference, so it filters candidates rather than ranking them.
             let prev = from[0];
-            let dv = (c.1 - prev.1).abs();
-            let dh = (c.0 - prev.0).abs() + (c.2 - prev.2).abs();
-            if dv + 1 > dh {
+            let grade_ok = |a: Pos, b: Pos| {
+                let dv = (a.1 - b.1).abs();
+                let dh = (a.0 - b.0).abs() + (a.2 - b.2).abs();
+                dv + 1 <= dh
+            };
+            // The last relay is also checked against the target it feeds: the
+            // final hop has no relay of its own to move, so if it is too steep
+            // there is nothing left to fix it with.
+            if !grade_ok(c, prev) || (stage + 1 >= stages && !grade_ok(c, target)) {
                 continue;
             }
             if let Some(r) = router.relay_site_room(grid, c, net_id) {
@@ -1153,9 +1159,23 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                 // rather than ranks.
                 .filter(|&c| {
                     let prev = from[0];
-                    let dv = (c.1 - prev.1).abs();
-                    let dh = (c.0 - prev.0).abs() + (c.2 - prev.2).abs();
-                    dv + 1 <= dh
+                    let grade_ok = |a: Pos, b: Pos| {
+                        let dv = (a.1 - b.1).abs();
+                        let dh = (a.0 - b.0).abs() + (a.2 - b.2).abs();
+                        dv + 1 <= dh
+                    };
+                    // Both directions, not just the one behind.
+                    //
+                    // A relay was only ever checked against its predecessor, so
+                    // the *last* one could satisfy its own hop and still leave
+                    // the final route to the feed unbuildable - and that route
+                    // has no relay of its own to be moved. `gcd` failed exactly
+                    // there: "route ran 13 blocks with no flat run to hold a
+                    // repeater" on `routing net 43 into gate 560`, with no
+                    // relay-stage prefix, which is the final hop saying it is a
+                    // staircase. The feed cannot move, so the relay in front of
+                    // it must.
+                    grade_ok(c, prev) && (stage + 1 < stages || grade_ok(c, feed))
                 })
                 .find(|&c| router.relay_site_clear(&grid, c, src))
                 .ok_or_else(|| {
@@ -1490,6 +1510,49 @@ mod tests {
     /// the *blocks themselves* are simulated and checked against the gate-level
     /// model. Nothing here is mocked.
     #[test]
+    /// A real program with a control FSM must place, end to end from source.
+    ///
+    /// Nothing in the suite did this. `sequential_netlists_place` builds a
+    /// one-flip-flop netlist by hand, which exercises the register bank but not
+    /// a program - and the gap was not academic: a gate-placement change passed
+    /// all 106 tests while leaving `tick.ohm` unplaceable, and only running the
+    /// design caught it. It had to be reverted in 1cde1c7.
+    ///
+    /// This is the smallest source that still needs an FSM, and it is not small:
+    /// a `while` loop costs 99 NOR gates and 11 flip-flops however little it
+    /// does, because the state vector, the halt latch and the register hold
+    /// logic come as a set. So the test is slow by the standards of this suite -
+    /// tens of seconds - and it is kept anyway. It guards the project's headline
+    /// capability, which has silently broken once already.
+    #[test]
+    fn a_program_with_an_fsm_places() {
+        let src = "\
+input  u1 go;
+output u1 done;
+fn spin(u1 k) -> u1 {
+    var u1 t = 0;
+    while (k != 0) { k = k - 1; t = 1; }
+    return t;
+}
+proc main() { done = spin(go); }";
+        let design = crate::lower::lower_program(&crate::parser::parse(src).unwrap()).unwrap();
+        let net = crate::bitblast::blast(&design);
+        assert!(net.dffs.len() >= 8, "a while loop should need real state");
+
+        let layout = build(&net).expect("a program with an FSM must place");
+
+        // The pieces a clocked design cannot run without. A placement that
+        // dropped any of them would still be a grid full of blocks.
+        assert_eq!(layout.flops, net.dffs.len(), "every register needs a flip-flop");
+        assert!(layout.clk_lever.is_some(), "no clock lever");
+        assert!(layout.clk_n_lever.is_some(), "no opposite clock phase");
+        assert!(layout.rst_lever.is_some(), "no asynchronous clear");
+        assert!(layout.net_reset_lever.is_some(), "no synchronous state reset");
+        assert_eq!(layout.input_levers.len(), 1);
+        assert_eq!(layout.output_lamps.len(), 1);
+        assert_eq!(layout.input_levers[0].0, "go", "input ports keep their name");
+    }
+
     fn ohm_source_compiles_to_working_redstone() {
         let src = "input u1 a; output u1 q; proc main() { q = !a; }";
         let design = crate::lower::lower_program(&crate::parser::parse(src).unwrap()).unwrap();
