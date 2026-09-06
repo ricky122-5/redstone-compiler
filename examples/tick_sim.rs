@@ -116,13 +116,31 @@ fn main() {
             trace.push(now);
         }
 
-        // Golden model.
-        let refs: Vec<(&str, u64)> = design
-            .inputs
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.name.as_str(), ((v >> i) & 1) as u64))
-            .collect();
+        // Golden model, driven with the *same bits the levers got*.
+        //
+        // This gave each port one bit of the sweep value - port 0 gets bit 0,
+        // port 1 gets bit 1 - which is right only when every port is one bit
+        // wide. `tick.ohm`'s single `u1 go` is, so it went unnoticed;
+        // `count.ohm`'s `u2 n` is not, so the model was asked for n=0 while the
+        // circuit was driven with n=2. It reported `lamps -> 2  want: c=0` and
+        // the circuit was the one telling the truth.
+        //
+        // This project has lost whole debugging cycles to harness faults dressed
+        // up as logic faults, so: split the value across ports by their declared
+        // widths, in the same order the levers are flattened.
+        let refs: Vec<(&str, u64)> = {
+            let mut shift = 0u32;
+            design
+                .inputs
+                .iter()
+                .map(|p| {
+                    let mask = if p.width >= 64 { u64::MAX } else { (1u64 << p.width) - 1 };
+                    let val = ((v as u64) >> shift) & mask;
+                    shift += p.width;
+                    (p.name.as_str(), val)
+                })
+                .collect()
+        };
         let want = machine::run_design(&design, &refs, 1_000_000)
             .map(|(m, c)| {
                 let outs: Vec<String> = design

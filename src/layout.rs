@@ -949,8 +949,25 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         // exits at its far side, so the run to the logic is 66 blocks of X with
         // a 5-block drop, and no sequential design could place at all.
         let span_x = (feed.0 - sources[0].0).abs();
+        let span_z = (feed.2 - sources[0].2).abs();
         let vstages = if drop > MAX_DROP { (drop + MAX_DROP - 1) / MAX_DROP } else { 1 };
-        let hstages = if span_x > MAX_HOP { (span_x + MAX_HOP - 1) / MAX_HOP } else { 1 };
+        // Stage on the whole horizontal reach, not just the X component.
+        //
+        // This keyed on X alone, which is fine as long as everything lives in
+        // one Z plane - and inside the gate array it does. A register bank does
+        // not: it sits behind the array, and with 42 flip-flops `gcd`'s bank is
+        // hundreds of blocks deep, so a Q reaching a gate is a long run that is
+        // almost entirely in Z. Being long in the unmeasured axis, it was routed
+        // as a single A* shot, and a direction-aware search with turn penalties
+        // exhausts its budget on a hop that size rather than arriving: `gcd`
+        // failed with a 133-block span, one source, and a search that crawled
+        // from 133 to 98 before giving up.
+        //
+        // `staged_route`, which wires the bank, has always measured the full
+        // horizontal span. This is the gate work list agreeing with it.
+        let span_reach = span_x + span_z;
+        let hstages =
+            if span_reach > MAX_HOP { (span_reach + MAX_HOP - 1) / MAX_HOP } else { 1 };
         // Stage a *steep* connection too, however short it is.
         //
         // Dust descends one block of Y per block travelled horizontally, so a
@@ -964,7 +981,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         // Better placement makes this *more* common, not less, because putting a
         // gate near its driver is exactly what removes the horizontal run the
         // descent was using. One relay fixes it.
-        let span_h = span_x + (feed.2 - sources[0].2).abs();
+        let span_h = span_reach;
         let steep = if drop * STEEP_SLACK > span_h { 2 } else { 1 };
         let stages = vstages.max(hstages).max(steep);
         // `OHMC_TRACE=1` prints the plan for every connection. Routing failures
