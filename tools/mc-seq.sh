@@ -22,6 +22,12 @@
 set -u
 
 OHM="${1:-examples/tick.ohm}"
+# Absolute, because the script cd's into the server directory before the run and
+# the golden-model comparison at the end then could not find the source: every
+# case printed "No such file or directory" where the expected answer should be.
+# Harmless-looking, and it is the third time in this harness that the comparison
+# has silently had nothing to compare against.
+case "$OHM" in /*) ;; *) OHM="$PWD/$OHM" ;; esac
 CYCLES="${2:-14}"
 D="${3:-/tmp/ohm-seq}"
 JAR_URL="https://piston-data.mojang.com/v1/objects/4707d00eb834b446575d89a61a11b5d548d8c001/server.jar"
