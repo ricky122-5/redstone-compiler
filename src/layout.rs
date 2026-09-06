@@ -148,6 +148,27 @@ struct Placed {
     cell: NorCell,
 }
 
+/// Is a hop from `a` to `b` a shape dust can actually make?
+///
+/// Two constraints, not one. Dust falls a block of Y per block travelled, so a
+/// hop needs at least as much horizontal run as vertical drop - that much was
+/// already enforced. But a repeater cannot sit on a slope, and a run dies after
+/// [`MAX_RUN`] blocks without one, so the path also needs a *flat cell often
+/// enough to refresh the signal*. A hop with exactly one block of slack is a
+/// staircase with a single flat step at one end, and the router duly reported
+/// "route ran 13 blocks with no flat run to hold a repeater" - which is this
+/// same constraint, discovered a layer too late, after the search had already
+/// spent its budget.
+///
+/// Covering `dv` of drop takes `dv` sloped steps; the spare horizontal blocks
+/// are the flat ones, and there must be enough of them to break the descent
+/// into stretches shorter than the budget.
+fn hop_is_buildable(a: Pos, b: Pos) -> bool {
+    let dv = (a.1 - b.1).abs();
+    let dh = (a.0 - b.0).abs() + (a.2 - b.2).abs();
+    dh >= dv + 1 + dv / (crate::tech::MAX_RUN - 1)
+}
+
 /// Stamp a relay: a repeater with dust either side.
 ///
 /// A relay is what makes a long descent possible. It restores the signal to
@@ -291,9 +312,9 @@ fn staged_route(
             let prev = from[0];
             let dv = (ry - prev.1).abs();
             let dh = (rx - prev.0).abs() + (rz - prev.2).abs();
-            // One spare block, so a hop is not merely buildable but has a flat
-            // cell to land a repeater on.
-            let need = dv + 1 - dh;
+            // Enough spare horizontal for a flat cell often enough to hold a
+            // repeater, not merely one block over the fall.
+            let need = dv + 1 + dv / (crate::tech::MAX_RUN - 1) - dh;
             if need > 0 {
                 // Offset across the direction of travel: if the hop is mostly a
                 // Z move, widen it in X, and vice versa.
@@ -340,11 +361,7 @@ fn staged_route(
             // unbuildable grade. Grade is a hard physical constraint, not a
             // preference, so it filters candidates rather than ranking them.
             let prev = from[0];
-            let grade_ok = |a: Pos, b: Pos| {
-                let dv = (a.1 - b.1).abs();
-                let dh = (a.0 - b.0).abs() + (a.2 - b.2).abs();
-                dv + 1 <= dh
-            };
+            let grade_ok = hop_is_buildable;
             // The last relay is also checked against the target it feeds: the
             // final hop has no relay of its own to move, so if it is too steep
             // there is nothing left to fix it with.
@@ -1118,9 +1135,9 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                 let prev = from[0];
                 let dv = (ry - prev.1).abs();
                 let dh = (rx - prev.0).abs() + (rz - prev.2).abs();
-                // One spare block, so the hop is not merely buildable but has a
-                // flat cell to land a repeater on.
-                let need = dv + 1 - dh;
+                // Enough spare horizontal for a flat cell often enough to hold a
+                // repeater, not merely one block over the fall.
+                let need = dv + 1 + dv / (crate::tech::MAX_RUN - 1) - dh;
                 if need > 0 {
                     // Across the direction of travel: out and back buys room for
                     // the next hop too, where extending along the line would
@@ -1159,11 +1176,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                 // rather than ranks.
                 .filter(|&c| {
                     let prev = from[0];
-                    let grade_ok = |a: Pos, b: Pos| {
-                        let dv = (a.1 - b.1).abs();
-                        let dh = (a.0 - b.0).abs() + (a.2 - b.2).abs();
-                        dv + 1 <= dh
-                    };
+                    let grade_ok = hop_is_buildable;
                     // Both directions, not just the one behind.
                     //
                     // A relay was only ever checked against its predecessor, so
