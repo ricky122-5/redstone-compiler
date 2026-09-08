@@ -1224,8 +1224,8 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             // own driver is boxed in - the router reports three open exits at a
             // gate's output spine - as because the destination is, and ripping
             // only around the target leaves that untouched.
-            let mut victims = router.crowders(feed, 24, src);
-            for v in router.crowders(sources[0], 20, src) {
+            let mut victims = router.crowders(feed, 40, src);
+            for v in router.crowders(sources[0], 36, src) {
                 if !victims.contains(&v) {
                     victims.push(v);
                 }
@@ -1261,8 +1261,8 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                 }
                 // Rip the nearest few nets crowding the target and try again.
                 // Their connections go back on the queue to be redone.
-                let mut victims = router.crowders(feed, 24, src);
-                for v in router.crowders(sources[0], 20, src) {
+                let mut victims = router.crowders(feed, 40, src);
+                for v in router.crowders(sources[0], 36, src) {
                     if !victims.contains(&v) {
                         victims.push(v);
                     }
