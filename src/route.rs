@@ -37,7 +37,20 @@ pub type NetId = u32;
 /// short straight into that gate's input.
 pub const PREPLACED: NetId = u32::MAX;
 
+#[derive(Clone)]
 pub struct Router {
+    /// How contested each cell has proved across routing attempts.
+    ///
+    /// This is the "history" half of negotiated congestion. Rip-up perturbs one
+    /// connection's neighbourhood at a time and is blind to the fact that the
+    /// same few corridors get fought over by everything - so an early net takes
+    /// a corridor, later nets fail around it, and re-routing them changes
+    /// nothing because the corridor is still the only way through. Charging for
+    /// a cell in proportion to how often it has been contested makes later
+    /// attempts spread out instead of queueing for the same ground.
+    ///
+    /// Empty by default, so a single-pass placement behaves exactly as before.
+    history: HashMap<Pos, i32>,
     /// Dust cells already placed, and which net owns them.
     owner: HashMap<Pos, NetId>,
     /// Cells no dust may ever occupy: cell bodies, and the clearance above
@@ -143,6 +156,7 @@ impl Router {
             reserved: HashMap::new(),
             blocked: HashSet::new(),
             scratch: HashSet::new(),
+            history: HashMap::new(),
             max_expansions: 250_000,
         };
         for (&p, &b) in grid.iter() {
@@ -364,6 +378,35 @@ impl Router {
             }
         }
         out
+    }
+
+    /// Charge a neighbourhood for having failed to admit a route.
+    ///
+    /// Called between passes, on the target and sources of a connection that
+    /// could not be placed. The penalty decays with distance so the blame
+    /// falls hardest where the search actually stalled.
+    pub fn blame(&mut self, centre: Pos, radius: i32, weight: i32) {
+        for dx in -radius..=radius {
+            for dy in -radius..=radius {
+                for dz in -radius..=radius {
+                    let d = dx.abs() + dy.abs() + dz.abs();
+                    if d > radius {
+                        continue;
+                    }
+                    let p = (centre.0 + dx, centre.1 + dy, centre.2 + dz);
+                    *self.history.entry(p).or_insert(0) += weight * (radius - d + 1) / (radius + 1);
+                }
+            }
+        }
+    }
+
+    /// Carry accumulated contention into a fresh router for the next pass.
+    pub fn inherit_history(&mut self, from: &Router) {
+        self.history = from.history.clone();
+    }
+
+    pub fn history_len(&self) -> usize {
+        self.history.len()
     }
 
     pub fn block(&mut self, p: Pos) {
@@ -614,6 +657,11 @@ impl Router {
                 let mut step = if q.1 == pos.1 { 10 } else { slope_cost };
                 if dir != 4 && dir != qdir {
                     step += TURN_COST;
+                }
+                // Contested ground costs more. Zero unless a previous pass
+                // recorded a failure here, so this is inert on a single pass.
+                if let Some(&h) = self.history.get(&q) {
+                    step += h;
                 }
                 let next = cost + step;
                 let key = (q, qdir);
