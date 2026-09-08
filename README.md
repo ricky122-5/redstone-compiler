@@ -320,6 +320,21 @@ cargo test        # 101 tests
   from one flip-flop up to eleven flops and 121 gates; every one places *and
   settles*.
 
+**Verified in unmodified Minecraft, under the current compiler:**
+
+| design | shape | result |
+|---|---|---|
+| `add.ohm` | 95 gates, combinational, 8-bit | 24 of 65536 inputs sampled, both sweep directions, all correct |
+| `tick.ohm` | 99 gates, 11 flip-flops, 6 basic blocks | both inputs, halts on the predicted cycle |
+| `count.ohm` | 165 gates, 15 flip-flops, 6 basic blocks | all four inputs, state vector matching the simulator register for register |
+
+`add` is re-checked against the current router rather than carried forward
+as a remembered result. Every routing rule underneath it changed: relay
+chains converge in Z, hop grade is constrained at both ends, the output
+spine cap went from 24 to 80 and the rip-up radius from 24 to 40. Its Z
+depth fell from 181 to 52 and it lost 2500 blocks, so "it passed once" was
+a claim about a build that no longer exists.
+
 **Not done — the honest gap:**
 
 1. **The 2-bit adder is 14/16 in the real game, and the harness is the weak
