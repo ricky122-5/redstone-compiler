@@ -335,6 +335,33 @@ spine cap went from 24 to 80 and the rip-up radius from 24 to 40. Its Z
 depth fell from 181 to 52 and it lost 2500 blocks, so "it passed once" was
 a claim about a build that no longer exists.
 
+**`gcd.ohm` routes 715 of its 1103 connections, and the remaining gap is
+congestion, not a missing rule.** Every local lever has been swept and is
+either at its optimum or saturated:
+
+| lever | result |
+|---|---|
+| rip-up attempts 6 → 20 | 330 → 330 (no effect) |
+| eviction radius 24 → 40 | 330 → **715** |
+| eviction radius 40 → 64 | 715 → 715 (saturated) |
+| grade slack `+2+dv/8` | 715 → 353 (worse) |
+| grade slack `+3+dv/6` | 715 → 236 (worse) |
+
+The pair at the top is the informative one: more attempts at the same
+radius change nothing, while the same attempts at a wider radius double
+the result. The router was never giving up too early - it was evicting
+the wrong neighbours, because the net holding the contested space sat
+outside the window it was allowed to consider.
+
+That also says where the ceiling comes from. Each connection can be helped
+by taking room from its neighbours, right up until the neighbours have
+none left to give, and no constant fixes that. What is needed is
+negotiated congestion in the PathFinder sense - route everything with
+overlap allowed, price shared cells, and re-route until nobody shares -
+which replaces the first-come-first-served ordering rather than working
+around it. Rip-up as it stands only ever perturbs one connection's
+neighbourhood at a time.
+
 **Not done — the honest gap:**
 
 1. **The 2-bit adder is 14/16 in the real game, and the harness is the weak

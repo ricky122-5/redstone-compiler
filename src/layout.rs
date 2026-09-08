@@ -163,6 +163,17 @@ struct Placed {
 /// Covering `dv` of drop takes `dv` sloped steps; the spare horizontal blocks
 /// are the flat ones, and there must be enough of them to break the descent
 /// into stretches shorter than the budget.
+/// The slack term is at an optimum, not merely untuned. Swept against `gcd`,
+/// which routes 715 of its 1103 connections at this value:
+///
+///     dh >= dv + 1 + dv/12   715   (this)
+///     dh >= dv + 2 + dv/8    353
+///     dh >= dv + 3 + dv/6    236
+///
+/// More slack is not safer. Demanding extra horizontal room rejects candidate
+/// relay sites wholesale, so relays land further from the line or are not found
+/// at all, and the failure changes from "this hop is the wrong shape" to "no
+/// route at all" - a worse problem than the one being avoided.
 fn hop_is_buildable(a: Pos, b: Pos) -> bool {
     let dv = (a.1 - b.1).abs();
     let dh = (a.0 - b.0).abs() + (a.2 - b.2).abs();
@@ -1261,6 +1272,12 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                 }
                 // Rip the nearest few nets crowding the target and try again.
                 // Their connections go back on the queue to be redone.
+                // Radius 40, and that is the top of the curve. Swept on `gcd`:
+                // 24 routes 330 connections, 40 routes 715, and 64 routes 715
+                // again - identical, same net, same gate. Raising the *attempt*
+                // count instead (6 to 20) changes nothing at all, because
+                // twenty attempts at the wrong neighbours is still the wrong
+                // neighbours.
                 let mut victims = router.crowders(feed, 40, src);
                 for v in router.crowders(sources[0], 36, src) {
                     if !victims.contains(&v) {
