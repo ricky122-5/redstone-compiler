@@ -179,9 +179,11 @@ struct Placed {
 /// The slack term is at an optimum, not merely untuned. Swept against `gcd`,
 /// which routes 715 of its 1103 connections at this value:
 ///
-///     dh >= dv + 1 + dv/12   715   (this)
-///     dh >= dv + 2 + dv/8    353
-///     dh >= dv + 3 + dv/6    236
+/// ```text
+/// dh >= dv + 1 + dv/12   715   (this)
+/// dh >= dv + 2 + dv/8    353
+/// dh >= dv + 3 + dv/6    236
+/// ```
 ///
 /// More slack is not safer. Demanding extra horizontal room rejects candidate
 /// relay sites wholesale, so relays land further from the line or are not found

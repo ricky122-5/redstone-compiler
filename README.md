@@ -440,6 +440,25 @@ needs around each connection; widening (gate gap 6 → 10) lengthens the wires
 instead and routes 181. Both directions lose, so the default is a genuine
 optimum on that trade and not an untuned guess.
 
+**Sharing wire between a net's branches does not help either.** The router gives
+every branch of a net its own disjoint path back to the driver. A branch is
+connected the moment it reaches any cell already carrying the signal, so letting
+it start from cells just downstream of the net's existing repeaters - full
+strength, clean signal budget - should save exactly the routing space that is
+binding. It saves the wire and loses the routing:
+
+| taps offered per branch | add | tick | count | gcd routed |
+|---|---|---|---|---|
+| none (star routing) | 12.7s | 18.1s | 31.2s | **715** |
+| all | 13.0s | 84.4s | 72.6s | 412 |
+| nearest 3 | 12.3s | 15.8s | 82.9s | 251 |
+
+Wire falls 5-6% in every case, and `tick` places 12% faster from three good
+seeds. `gcd` gets worse either way. Seeding A* with every tap turns a focused
+search into a broad one - it fails with "gave up after 250001 expansions" - and
+restricting to the nearest three fixes the small designs without helping the
+large one at all.
+
 That also says where the ceiling comes from. Each connection can be helped
 by taking room from its neighbours, right up until the neighbours have
 none left to give, and no constant fixes that. What is needed is
