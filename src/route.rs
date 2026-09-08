@@ -841,7 +841,15 @@ impl Router {
         // one could not, and costs nothing on any design that already worked.
         let slopes = [14, 20, 28, 40];
         let mut last_err = String::from("no attempt made");
-        for attempt in 0..24 {
+        // The retry ladder is what makes a *failing* route expensive: up to
+        // twenty-four searches of a quarter-million expansions each, all thrown
+        // away. That is the right trade when a route can be found, and pure
+        // waste when it cannot - so a diagnostic run can cap it and get through
+        // a design several times faster. Measuring `gcd`'s failure profile at
+        // the full ladder took hours and never finished.
+        let attempts: usize =
+            std::env::var("OHMC_ATTEMPTS").ok().and_then(|v| v.parse().ok()).unwrap_or(24);
+        for attempt in 0..attempts {
             let div: usize = std::env::var("OHMC_SDIV").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
             let slope_cost = slopes[(attempt / div).min(slopes.len() - 1)];
             // Cycle the heuristic weight, exact first, rather than escalating
