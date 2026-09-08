@@ -402,6 +402,23 @@ The spread is in the netlist's connectivity, and clamping positions does not
 change connectivity - it needs real placement (analytical, or partitioning so
 strongly-connected gates share a region), not a clamp on this sweep.
 
+Three placement fixes were tried against that width and all three fail, which
+corrects the diagnosis above:
+
+| placement change | effect |
+|---|---|
+| cap how far a wish may open a gap | 715 → 271 (cap 20), 156 (cap 60) |
+| relaxation rounds that let a gate move *left* | no effect at all — width identical |
+| place at the median of drivers, not the mean | width 1003 → 1101, mean span 406 → 719 |
+
+The relaxation result is the informative one. If the array were wide because the
+legalising sweep ratchets rightward, letting gates move left would contract it;
+it changes nothing. So the width is not an artefact of legalisation - the
+*barycenters themselves* are spread, because the gates they are computed from
+are spread, which is circular. That is the problem analytical placement exists
+to solve by solving for all positions at once, and it is not reachable by a
+local sweep however it is legalised.
+
 That also says where the ceiling comes from. Each connection can be helped
 by taking room from its neighbours, right up until the neighbours have
 none left to give, and no constant fixes that. What is needed is
