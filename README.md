@@ -378,6 +378,30 @@ than their numbers:
   between passes, so that the nets holding the corridors have to re-justify
   them.
 
+**The array is five times wider than packing needs, and that is where the
+long connections come from.** `examples/fanout.rs` with `OHMC_NET=` names a
+signal's driver and readers; `OHMC_TRACE=1` prints the plan for every
+connection. Together they identify the connection that fails in nearly every
+configuration tried:
+
+    conn g216 in1 <- net215: src0=(423,-6,2) feed=(982,-11,-7) drop=5 spanx=559
+
+Gate 216 is `Nor([167, 215])`. Its two drivers sit far apart, barycenter
+placement puts it at their mean, and it lands at x=982 in empty space - 559
+blocks from the spine that has to reach it, for a five-block drop. Because the
+placement sweep can only push a gate *right* (`at = max(wish, prev_end)`), that
+one outlier stretches its whole row, and across 28 levels `gcd`'s array reaches
+1164 blocks wide where packing 724 gates needs about 230. A third of all
+connections span over 200 blocks in X.
+
+Capping how far a wish may open a gap does not fix it: 60 routes 156
+connections and 20 routes 271, against 715 uncapped. Width is a symptom, not
+the cause. Gate 216 *wants* to be at 982 because its drivers are 1100 blocks
+apart, and forcing it nearer one of them only lengthens the wire to the other.
+The spread is in the netlist's connectivity, and clamping positions does not
+change connectivity - it needs real placement (analytical, or partitioning so
+strongly-connected gates share a region), not a clamp on this sweep.
+
 That also says where the ceiling comes from. Each connection can be helped
 by taking room from its neighbours, right up until the neighbours have
 none left to give, and no constant fixes that. What is needed is

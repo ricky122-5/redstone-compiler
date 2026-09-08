@@ -29,6 +29,20 @@ fn main() {
     for (s, f) in v.iter().take(12) {
         println!("  net {s:>4}: {f:>4} consumers   {:?}", net.src(*s));
     }
+    // Ask about one signal specifically: what it is, what drives it, and who
+    // reads it. A connection that fails across every configuration is worth
+    // identifying rather than tuning around.
+    if let Ok(q) = std::env::var("OHMC_NET") {
+        for want in q.split(',').filter_map(|t| t.trim().parse::<u32>().ok()) {
+            println!("\nnet {want}: {:?}", net.src(want));
+            println!("  operands: {:?}", net.operands(want));
+            let readers: Vec<u32> = (0..net.sigs.len() as u32)
+                .filter(|&s| net.operands(s).contains(&want))
+                .collect();
+            println!("  read by {} gate(s): {:?}", readers.len(), &readers[..readers.len().min(12)]);
+        }
+    }
+
     let total: usize = v.iter().map(|&(_, f)| f).sum();
     println!("total connections {total}");
     for cap in [24usize, 48, 96] {
