@@ -419,6 +419,27 @@ are spread, which is circular. That is the problem analytical placement exists
 to solve by solving for all positions at once, and it is not reachable by a
 local sweep however it is legalised.
 
+**Wire length is not the binding constraint - routing space is.** Levelisation
+is ASAP, which crams gates into the earliest level their inputs allow, and that
+is very lopsided: `gcd` puts 120 of its 608 gates on level 2 against a mean of
+21.7. A level is one row, so that single row is 1080 blocks wide and the whole
+array measures 1164. Gates within a level are independent by construction, so
+spilling the excess to later levels is always legal, and `OHMC_LEVEL_CAP` does
+exactly that:
+
+| level cap | array width | mean span | routed |
+|---|---|---|---|
+| none (ASAP) | 1003 | 406 | **715** |
+| 45 | 345 | 120 | 379 |
+| 30 | 195 | 106 | 431 |
+
+It works precisely as designed and makes routing *worse*. A five-fold narrower
+array with four-fold shorter connections routes half as many of them. Narrowing
+concentrates the same gates into less space and takes away the room the router
+needs around each connection; widening (gate gap 6 → 10) lengthens the wires
+instead and routes 181. Both directions lose, so the default is a genuine
+optimum on that trade and not an untuned guess.
+
 That also says where the ceiling comes from. Each connection can be helped
 by taking room from its neighbours, right up until the neighbours have
 none left to give, and no constant fixes that. What is needed is

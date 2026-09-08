@@ -433,11 +433,53 @@ fn staged_route(
 /// Assign every combinational signal a logic level: leaves at 0, each NOR one
 /// past its deepest operand.
 fn levelize(net: &Netlist, roots: &[Sig]) -> Vec<i32> {
+    // A gate may sit at *any* level past its operands, not just the earliest.
+    //
+    // Plain ASAP levelisation crams every gate into the first level its inputs
+    // allow, and the result is wildly lopsided: `gcd` puts 120 of its 608 gates
+    // on level 2 against a mean of 21.7. A level is one row along X, so at nine
+    // blocks a gate that single level is 1080 blocks wide - and the whole array
+    // measures 1164. One level sets the width of the build, and every
+    // connection that crosses the array is long because of it.
+    //
+    // Gates within a level are mutually independent by construction: none feeds
+    // another, or it would be a level deeper. So spilling the excess to the next
+    // level is always legal, and processing in topological order keeps it
+    // correct without a second pass - every operand already has its final level
+    // when a gate is assigned.
+    //
+    // The trade is depth for width: more levels means a taller build and longer
+    // descents. `OHMC_LEVEL_CAP` sets the cap; unset means ASAP, exactly as
+    // before.
+    //
+    // And it does not help, which is the most surprising measurement here. The
+    // cap works exactly as intended - `gcd`'s array narrows from 1003 blocks to
+    // 195 at a cap of 30, and its mean connection span falls from 406 to 106 -
+    // and *fewer* connections route: 431 at cap 30, 379 at cap 45, against 715
+    // uncapped.
+    //
+    // So wire length is not the binding constraint; local routing space is.
+    // Narrowing the array shortens every wire and removes the room the router
+    // needs around each one, and widening it (gate gap 6 to 10) lengthens the
+    // wires instead - 181 routed. Both directions lose, so the default sits at a
+    // real optimum on that trade rather than an untuned guess. Kept because the
+    // measurement is worth more than the knob: it rules out a whole class of
+    // fix, and "make the build smaller" is the first thing anyone would try.
+    let cap: usize = std::env::var("OHMC_LEVEL_CAP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(usize::MAX);
     let mut level = vec![0i32; net.sigs.len()];
+    let mut used: HashMap<i32, usize> = HashMap::new();
     for s in net.topo_order(roots) {
         if matches!(net.src(s), Src::Nor(_)) {
             let d = net.operands(s).iter().map(|&o| level[o as usize]).max().unwrap_or(0);
-            level[s as usize] = d + 1;
+            let mut l = d + 1;
+            while used.get(&l).copied().unwrap_or(0) >= cap {
+                l += 1;
+            }
+            *used.entry(l).or_default() += 1;
+            level[s as usize] = l;
         }
     }
     level
