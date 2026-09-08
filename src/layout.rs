@@ -978,6 +978,68 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     // One index per staged connection, so the relay band allocator has something
     // per-chain to key on.
     let mut chain_seq: usize = 0;
+    // Negotiated congestion, the part rip-up alone cannot do.
+    //
+    // Local rip-up evicts a failing connection's neighbours and re-routes them.
+    // That redistributes what one net is holding; it cannot stop the design
+    // funnelling everything through the same corridor, because the nets already
+    // holding that corridor are never asked to justify it - they were routed
+    // first and they keep it for free. Measured: widening the eviction radius
+    // doubled `gcd` to 715 and widening it again did nothing at all.
+    //
+    // A *global* rip-up asks everyone. When a connection has exhausted local
+    // eviction, the ground that refused it is charged (see `Router::blame`),
+    // every routed net is torn out, and the whole design re-routes against the
+    // accumulated history - so the nets that took the good corridors have to
+    // win them again against a cost that now reflects who else needed them.
+    // That is the PathFinder idea, applied at the point of failure rather than
+    // as a fixed iteration count.
+    let max_restarts: u32 =
+        std::env::var("OHMC_RESTARTS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    // The charge must be gentle. A flat move costs 10, so a weight of 25 does
+    // not nudge the search away from contested ground - it walls it off, and a
+    // clean second pass reached 90 connections where the first reached 715.
+    // PathFinder raises history by a small amount over many iterations for
+    // exactly this reason: the point is to break ties between comparable routes,
+    // not to forbid ground that something still has to cross.
+    // Measured on `gcd`, and it does not work in this form. Pass one reaches 715
+    // routed connections; pass two, re-routing everything from a clean grid
+    // against the charge, reaches:
+    //
+    //     weight  1     715   identical run - too weak to change anything
+    //     weight  3     283
+    //     weight 25      90
+    //
+    // There is no useful middle. The charge is either ignored or harmful, never
+    // helpful, and that is not a calibration problem. `blame` charges the
+    // neighbourhood of *one connection that failed*, which is where a route gave
+    // up - not where the contention is. PathFinder gets its signal by letting
+    // nets overlap and counting genuinely over-subscribed cells; that is a
+    // measurement of contention, and this is a guess at it. Without the
+    // overlap-permitting search there is nothing real to negotiate over, so the
+    // charge only distorts a cost function that was doing better on its own.
+    //
+    // Kept, off by default, because the surrounding machinery is the part that
+    // was hard to get right and is needed by the real version: clean-grid
+    // restarts that restore from a snapshot rather than unpicking relays, and
+    // history carried across passes.
+    let blame_w: i32 =
+        std::env::var("OHMC_BLAME_W").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    let blame_r: i32 =
+        std::env::var("OHMC_BLAME_R").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+    let mut restarts: u32 = 0;
+    // A restart must put the grid back as it was, not unpick it.
+    //
+    // `Router::rip` deliberately spares `claimed` cells, and a relay's two
+    // endpoints are claimed with its body blocked - so ripping every net removes
+    // the wires and leaves every relay of the previous pass stamped in the grid
+    // as a dead obstacle. Re-routing into that collapsed `gcd` from 715 routed
+    // connections to 67: the design was navigating a field of orphaned relays.
+    // Snapshotting the grid and the router before any routing happens, and
+    // restoring both, is the only way to get a genuinely clean pass.
+    let grid_snapshot = grid.clone();
+    let router_snapshot = router.clone();
+    let all_work: Vec<(Sig, usize, Sig)> = work.iter().map(|&(g, j, s, _)| (g, j, s)).collect();
     let mut done: Vec<(Sig, usize, Sig)> = Vec::new();
     while let Some((g, j, src)) = queue.pop_front() {
         let feed = stub_entry[&(g, j)];
@@ -1248,6 +1310,32 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             let tries = rips.entry((g, j)).or_insert(0);
             *tries += 1;
             if *tries > 6 {
+                // Same global rip-up as the final-hop handler below. Both are
+                // needed: a staged connection can exhaust local eviction on any
+                // of its relay hops, and on `gcd` that is where it actually
+                // happens - patching only the final hop left the restart path
+                // never firing at all.
+                if restarts < max_restarts {
+                    restarts += 1;
+                    router.blame(feed, blame_r, blame_w);
+                    router.blame(sources[0], blame_r, blame_w);
+                    let carried = router.clone();
+                    grid = grid_snapshot.clone();
+                    router = router_snapshot.clone();
+                    router.inherit_history(&carried);
+                    eprintln!(
+                        "restart {restarts} (relay stage): charged {} cells, re-routing all \
+                         {} connections from a clean grid (reached {routed})",
+                        router.history_len(),
+                        all_work.len()
+                    );
+                    queue = all_work.iter().copied().collect();
+                    done.clear();
+                    routed = 0;
+                    rips.clear();
+                    chain_seq = 0;
+                    continue;
+                }
                 return Err(format!("{e}\nnote: {routed} of {total_conns} routed"));
             }
             // Look at both ends. A connection stalls just as often because its
@@ -1282,6 +1370,29 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                 let tries = rips.entry((g, j)).or_insert(0);
                 *tries += 1;
                 if *tries > 6 {
+                    if restarts < max_restarts {
+                        restarts += 1;
+                        // Charge the ground that refused this route, then make
+                        // the whole design re-route against the new costs.
+                        router.blame(feed, blame_r, blame_w);
+                        router.blame(sources[0], blame_r, blame_w);
+                        let carried = router.clone();
+                        grid = grid_snapshot.clone();
+                        router = router_snapshot.clone();
+                        router.inherit_history(&carried);
+                        eprintln!(
+                            "restart {restarts}: charged {} cells, re-routing all {} \
+                             connections from a clean grid (reached {routed})",
+                            router.history_len(),
+                            all_work.len()
+                        );
+                        queue = all_work.iter().copied().collect();
+                        done.clear();
+                        routed = 0;
+                        rips.clear();
+                        chain_seq = 0;
+                        continue;
+                    }
                     return Err(format!(
                         "routing net {src} into gate {g} input {j}: {e}\n\
                          note: {routed} of {total_conns} connections routed, and ripping \
