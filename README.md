@@ -339,19 +339,44 @@ a claim about a build that no longer exists.
 congestion, not a missing rule.** Every local lever has been swept and is
 either at its optimum or saturated:
 
-| lever | result |
+| lever | routed / 1103 |
 |---|---|
-| rip-up attempts 6 → 20 | 330 → 330 (no effect) |
-| eviction radius 24 → 40 | 330 → **715** |
-| eviction radius 40 → 64 | 715 → 715 (saturated) |
-| grade slack `+2+dv/8` | 715 → 353 (worse) |
-| grade slack `+3+dv/6` | 715 → 236 (worse) |
+| **current settings** | **715** |
+| eviction radius 24 (was) | 330 |
+| eviction radius 64 | 715 — saturated |
+| rip-up attempts 6 → 20 | 330 — no effect |
+| connection order: easiest first | 580 |
+| connection order: grouped by net | 65 |
+| grade slack `+2+dv/8` | 353 |
+| grade slack `+3+dv/6` | 236 |
+| gate gap 6 → 10 | 181 |
+| level pitch 6 → 9 | 1 |
+| congestion charge, weight 15 | 453 |
+| congestion charge, weight 40 | 314 |
 
 The pair at the top is the informative one: more attempts at the same
 radius change nothing, while the same attempts at a wider radius double
 the result. The router was never giving up too early - it was evicting
 the wrong neighbours, because the net holding the contested space sat
 outside the window it was allowed to consider.
+
+Thirteen variants; the current configuration is the best of all of them and a
+local optimum in every direction tested. Three of those results are worth more
+than their numbers:
+
+* **Level pitch is not a spacing knob.** `LEVEL_H` divides `MAX_DROP`, so a
+  relay hop spans exactly two levels; at 9 that relationship breaks and the
+  design routes *one* connection. The two constants sit five lines apart with
+  nothing recording the coupling.
+* **More room makes it worse.** Widening the gate gap gives every wire more
+  space and more distance to cross, and the distance costs more than the space
+  buys - 181 against 715.
+* **A congestion charge applied online does not work.** Penalising contested
+  ground during a forward pass charges it only *after* the early nets have taken
+  the good corridors, so it pushes the later, already-struggling nets further
+  out without freeing anything. It has to be paired with ripping up everything
+  between passes, so that the nets holding the corridors have to re-justify
+  them.
 
 That also says where the ceiling comes from. Each connection can be helped
 by taking room from its neighbours, right up until the neighbours have

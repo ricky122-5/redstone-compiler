@@ -26,11 +26,24 @@ use std::collections::HashMap;
 
 /// Vertical pitch between logic levels. A cell body needs 4 (`y-1 ..= y+2`),
 /// so this leaves `LEVEL_H - 4` free Y layers between rows for crossings.
+/// Vertical pitch between gate levels.
+///
+/// Coupled to [`MAX_DROP`], not free. At 6 a relay hop of 12 spans exactly two
+/// levels, and the staging arithmetic is built on that. Setting it to 9 does not
+/// merely space the array out - it takes `gcd` from 715 routed connections to
+/// **1**. Nothing recorded that before; the two constants sit five lines apart
+/// with no note that one divides the other.
 const LEVEL_H: i32 = 6;
 /// Z of every gate row. Cells occupy `z-1 ..= z+2`, leaving the rest of Z open
 /// for routing.
 const GATE_Z: i32 = 0;
 /// Spare X columns between adjacent gates in a row.
+/// Horizontal gap between gates in a level.
+///
+/// Widening this to buy the router room is a trap: more space per gate means a
+/// wider array, longer wires, more relays, and more contested ground crossed
+/// than the extra room gives back. On `gcd`, 10 routes 181 connections against
+/// 715 at 6.
 const GATE_GAP: i32 = 6;
 /// Length of the private approach lane in front of each gate input.
 const STUB_LEN: i32 = 4;
@@ -938,6 +951,12 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     }
     // Descending difficulty; gate and input index break ties so builds stay
     // byte-identical across runs.
+    //
+    // Both alternatives were tried on `gcd` and both are worse than the 715 this
+    // routes: easiest-first manages 580, and grouping connections by net manages
+    // 65. The second is the instructive one - routing a driver's branches
+    // together sounds tidy, and it starves every other net of corridors while
+    // one spine is served.
     work.sort_by_key(|&(g, j, _, dist)| (std::cmp::Reverse(dist), g, j));
 
     let total_conns = work.len();
