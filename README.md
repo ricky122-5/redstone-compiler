@@ -678,6 +678,57 @@ stages a connection gets, so that was traced too: 17 of 1103 connections plan
 one relay more than the nearest source needs, and none plans too few. Not worth
 changing.
 
+**Spilling gates to later levels is the largest single win, and the metric is
+why it was missed.** `OHMC_LEVEL_CAP` caps how many gates a level may hold and
+pushes the excess to later ones - always legal, since gates within a level are
+independent. Measured by first failure it looked disastrous: 379 connections at
+cap 45 and 431 at cap 30, against 715 uncapped. Measured by survey, on the same
+binary, without seeding:
+
+| level cap | routed / 1103 | unroutable |
+|---|---|---|
+| 16 | 1030 | 73 |
+| 20 | 1023 | 80 |
+| 22 | 1029 | 74 |
+| **24** | **1035** | **68** |
+| 26 | 1014 | 89 |
+| 30 | 1005 | 98 |
+
+Uncapped placement lost 296 on the code of the previous section; on this code
+it was stopped early rather than run out, at 56 unroutable by 300 connections
+taken against 17 to 24 for the caps at that point. Everything from 16 to 24
+lands in a 68-80 band, so those differences are noise; the gap to uncapped is
+not.
+A capped survey also runs in ten minutes rather than three hours, because the
+wires are short. The first-failure metric did not merely have a wide error bar
+here - it ranked the best available setting *below* the worst.
+
+**Two router bugs, found by asking why a connection failed rather than how many
+did.** Both are corrected above; both were invisible to the count alone.
+`OHMC_SURVEY_WHY` writes each unroutable connection with its error, and the
+tally is what pointed at each one: relay grades measured from the wrong end of
+a driver's spine, and relay heights that truncated the per-stage drop and left
+the whole shortfall on the final hop.
+
+**Routing a connection all-or-nothing is worth as much as seeding.** A staged
+connection commits each relay hop as it goes, so one that failed at stage 5 used
+to leave stages 1-4 in the grid, and a survey loses a hundred or more
+connections that way - each leaving a dead partial chain for everything routed
+after it. Rip-up leaked the same way: it removed a net's dust but left the
+substrate under it, the blocked clearance above it, and its relays. On cap 30,
+taking both back drops the count from 126 to 98, which is more than seeding
+bought there (114), and the two were not additive - the debris *was* much of
+what seeding was routing around.
+
+**Two levers that are not levers.** The grade rule's slack, swept on cap 24 by
+survey: `+1 + dv/6` gives 69 and `+2 + dv/8` gives 72, against 68 for the
+default `+1 + dv/11`. And the search budget is not the constraint: at four times
+250,000 expansions the run is identical to the default connection for
+connection, which settles what the 34 failures that ended at exactly the cap
+were - not slow, unreachable. Both variants led at every mid-run checkpoint and
+converged by the end; on this design a lead at 300, 600 or 900 connections taken
+has reversed four times, and only the final count means anything.
+
 **Not done — the honest gap:**
 
 1. **The 2-bit adder is 14/16 in the real game, and the harness is the weak
