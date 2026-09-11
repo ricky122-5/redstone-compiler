@@ -641,6 +641,43 @@ which replaces the first-come-first-served ordering rather than working
 around it. Rip-up as it stands only ever perturbs one connection's
 neighbourhood at a time.
 
+**Seeding the router with measured contention helps on every order, but not
+enough on its own.** The isolation run already produces the map a negotiated
+router would price: `OHMC_WRITE_CONGESTION` writes each cell's footprint count,
+and `OHMC_SEED_HISTORY` loads it into the router's history before anything is
+routed, charging `OHMC_SEED_W * (n - 1)` for a cell that `n` connections want.
+Surveyed the same way, without rip-up:
+
+| tie order | unseeded | seed weight 2 | seed weight 5 |
+|---|---|---|---|
+| default | 807 / 296 | 849 / 254 | **865 / 238** |
+| seed 1 | 827 / 276 | 840 / 263 | |
+| seed 2 | 806 / 297 | 842 / 261 | |
+
+(routed / unroutable, of 1103.) The gain ranges from 13 to 58 connections, and
+it holds at every checkpoint along the way, not just at the end. Weight 10 had
+nothing to add over weight 5 by 300 connections taken. The failures still sit
+on the same wide nets: 167 loses 26 connections at either weight, and 130
+connections fail unseeded, at weight 2 and at weight 5 alike.
+
+What remains is mostly contention, not placement. 250 of the 254 connections
+that fail at weight 2 route when tried alone. The next round prices those cells
+too - `OHMC_ONLY` routes just a survey's unroutable list in isolation, and the
+footprint it writes is added to the map before re-routing. That is PathFinder's
+history update, taken one whole pass at a time, and it is being surveyed now.
+
+**The four that did not route alone were a bug.** All four were net 43, a
+flip-flop output with a 68-cell spine, and the first relay of each chain was
+graded against `sources[0]` - the spine's far end, 35 to 51 blocks away. The
+router leaves from the nearest spine cell, which was 4 to 6 blocks away with 11
+to fall: a staircase with no flat cell for a repeater, which passed the check.
+On an empty grid the retry ladder found a way round it; with seeded history, two
+of the four could not. Relay sites are now graded against the nearest source,
+and all four route. The same `sources[0]` measurement also decides how many
+stages a connection gets, so that was traced too: 17 of 1103 connections plan
+one relay more than the nearest source needs, and none plans too few. Not worth
+changing.
+
 **Not done — the honest gap:**
 
 1. **The 2-bit adder is 14/16 in the real game, and the harness is the weak
