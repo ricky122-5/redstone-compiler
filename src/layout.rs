@@ -1156,6 +1156,11 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     let rip_budget: u32 =
         std::env::var("OHMC_RIPS").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
     let mut unroutable: Vec<(Sig, usize, Sig)> = Vec::new();
+    // Connections taken off the queue, for the survey's progress line. A survey
+    // keeps going past failures, and on `gcd` that is hours of work with nothing
+    // printed until the end - so there was no way to tell a run nearly done from
+    // one barely started, or to read a trend before it finished.
+    let mut popped = 0usize;
     let mut iso_ok = 0usize;
     // How many connections' keepout footprints each cell falls in.
     let mut demand: HashMap<Pos, i32> = HashMap::new();
@@ -1189,6 +1194,16 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         if isolate {
             grid = grid_snapshot.clone();
             router = router_snapshot.clone();
+        }
+        if survey {
+            popped += 1;
+            if popped % 50 == 0 {
+                eprintln!(
+                    "progress: {popped} taken, {routed} routed, {} unroutable, {} still queued",
+                    unroutable.len(),
+                    queue.len()
+                );
+            }
         }
         let feed = stub_entry[&(g, j)];
         let sources = spine

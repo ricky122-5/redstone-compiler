@@ -527,6 +527,27 @@ the thing a different order changes. What the numbers support is narrower:
 every connection routes alone, they fail by crowding each other, and which one
 fails first is close to arbitrary.
 
+`OHMC_SURVEY=1` replaces the metric: it gives up on a connection once its rip-up
+rounds are spent, keeps going, and reports how many route in total. A survey on
+`gcd` is expensive, so its budgets were calibrated first on `count`, which routes
+fully:
+
+| `count` survey | routed | time |
+|---|---|---|
+| `OHMC_ATTEMPTS=24 OHMC_RIPS=6` (defaults) | 233 of 233 | 30s |
+| `OHMC_ATTEMPTS=24 OHMC_RIPS=1` | 233 of 233 | 29s |
+| `OHMC_ATTEMPTS=4 OHMC_RIPS=1` | 195 of 233 | 135s |
+| `OHMC_ATTEMPTS=4 OHMC_RIPS=6` | 148 of 233 | 888s |
+
+A single rip-up round with the full retry ladder is as faithful as the defaults
+and as fast, so that is what a `gcd` survey should use. Cutting the ladder is a
+false economy twice over: it loses connections, and the failures it causes make
+the run slower. The last row is the instructive one. With a weak search, *more*
+rip-up is worse - 195 routed becomes 148 and the run takes six times as long -
+because every connection it evicts cannot find a new path either, fails, and
+evicts its own neighbours in turn. Rip-up helps only when the search is strong
+enough to re-route whatever it displaces.
+
 That also says where the ceiling comes from. Each connection can be helped
 by taking room from its neighbours, right up until the neighbours have
 none left to give, and no constant fixes that. What is needed is
