@@ -1001,7 +1001,28 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     // 65. The second is the instructive one - routing a driver's branches
     // together sounds tidy, and it starves every other net of corridors while
     // one spine is served.
-    work.sort_by_key(|&(g, j, _, dist)| (std::cmp::Reverse(dist), g, j));
+    // `OHMC_TIE_SEED` reorders connections of *equal* difficulty, and nothing else.
+    //
+    // Every order it produces is as valid as the default: same netlist, same
+    // placement, same hardest-first policy - only ties are broken differently.
+    // So the spread of routed connections across seeds is the noise floor of the
+    // "N of 1103 routed" metric, and a comparison between two builds means
+    // nothing unless its difference is larger than that. `gcd`'s default reaches
+    // 715; almost every change tried lands between 125 and 450, including ones
+    // that remove a measured bottleneck, and that pattern fits an unstable
+    // process as well as it fits a real optimum.
+    match std::env::var("OHMC_TIE_SEED").ok().and_then(|v| v.parse::<u64>().ok()) {
+        Some(seed) => {
+            let mix = |g: Sig, j: usize| -> u64 {
+                let mut z = seed ^ ((g as u64) << 20) ^ (j as u64) ^ 0x9e37_79b9_7f4a_7c15;
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                z ^ (z >> 31)
+            };
+            work.sort_by_key(|&(g, j, _, dist)| (std::cmp::Reverse(dist), mix(g, j), g, j));
+        }
+        None => work.sort_by_key(|&(g, j, _, dist)| (std::cmp::Reverse(dist), g, j)),
+    }
 
     let total_conns = work.len();
     let mut routed = 0usize;
