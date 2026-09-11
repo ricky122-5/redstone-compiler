@@ -17,6 +17,11 @@ fn main() {
     let mut b = bitblast::blast(&design);
     let before = b.max_nor_fanout();
     let made = b.clone_high_fanout(t);
+    // Same order as the driver: clone, then buffer.
+    if let Some(bt) = std::env::var("OHMC_BUFFER").ok().and_then(|v| v.parse::<usize>().ok()) {
+        let bufs = b.buffer_high_fanout(bt);
+        println!("buffered {bufs} reader group(s) at threshold {bt}");
+    }
     println!("{path}: threshold {t}, {made} copies, max NOR fan-out {before} -> {}, gates {} -> {}",
         b.max_nor_fanout(), a.gate_count(), b.gate_count());
 

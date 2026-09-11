@@ -148,6 +148,11 @@ fn run(args: &[String]) -> Result<(), String> {
                 placed_net.max_nor_fanout()
             );
         }
+        // Buffer wide flip-flop outputs, inputs and reset, which cannot be cloned.
+        if let Some(t) = std::env::var("OHMC_BUFFER").ok().and_then(|v| v.parse::<usize>().ok()) {
+            let made = placed_net.buffer_high_fanout(t);
+            eprintln!("buffered {made} reader group(s) of wide non-NOR sources (threshold {t})");
+        }
         let layout = layout::build(&placed_net)?;
         // The control levers are reported in the same frame as everything else
         // the caller is given, which means the *.mcfunction* frame when one is

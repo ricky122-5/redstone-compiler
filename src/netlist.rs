@@ -400,6 +400,103 @@ impl Netlist {
         made
     }
 
+    /// Split the readers of a wide *non-NOR* source - a flip-flop output, a
+    /// primary input, the reset line - between the source and buffered copies of
+    /// it. Returns how many buffers were inserted.
+    ///
+    /// Cloning cannot help these: a flip-flop is not a gate that can be copied.
+    /// But `NOR(NOR(s))` is `s`, so a pair of NOR gates is a buffer, and each
+    /// buffer can serve its own group of readers from wherever placement puts it.
+    /// On `gcd` this is `DffQ(41)`: 42 readers, and an eviction-free survey loses
+    /// sixteen to eighteen of them in every order tried, ten of them the same in
+    /// two different orders.
+    ///
+    /// The first group stays on the source, so the source keeps a direct reader
+    /// set plus one inverter per extra group. Each buffer adds two gate levels to
+    /// the paths it serves. Both inverters are pushed straight into `sigs`
+    /// without interning: `Nor([s])` usually exists already (on `gcd` it is net
+    /// 167, the widest NOR in the design), and interning would hand that back.
+    pub fn buffer_high_fanout(&mut self, max_fanout: usize) -> usize {
+        #[derive(Clone, Copy)]
+        enum Reader {
+            Gate(Sig),
+            Dff(usize),
+            Out(usize, usize),
+            Done,
+        }
+        let max_fanout = max_fanout.max(2);
+        let roots = self.roots();
+        let mut depth = vec![0u32; self.sigs.len()];
+        for s in self.topo_order(&roots) {
+            if let Src::Nor(v) = &self.sigs[s as usize] {
+                depth[s as usize] = 1 + v.iter().map(|&o| depth[o as usize]).max().unwrap_or(0);
+            }
+        }
+        let mut readers: HashMap<Sig, Vec<Reader>> = HashMap::new();
+        for (i, src) in self.sigs.iter().enumerate() {
+            if let Src::Nor(v) = src {
+                for &o in v {
+                    readers.entry(o).or_default().push(Reader::Gate(i as Sig));
+                }
+            }
+        }
+        for (i, d) in self.dffs.iter().enumerate() {
+            readers.entry(d.d).or_default().push(Reader::Dff(i));
+        }
+        for (p, (_, bits)) in self.outputs.iter().enumerate() {
+            for (b, &s) in bits.iter().enumerate() {
+                readers.entry(s).or_default().push(Reader::Out(p, b));
+            }
+        }
+        readers.entry(self.done).or_default().push(Reader::Done);
+
+        let mut targets: Vec<(Sig, Vec<Reader>)> = readers
+            .into_iter()
+            .filter(|(s, r)| {
+                matches!(self.sigs[*s as usize], Src::DffQ(_) | Src::Input { .. } | Src::Reset)
+                    && r.len() > max_fanout
+            })
+            .collect();
+        targets.sort_by_key(|(s, _)| *s);
+
+        let mut made = 0;
+        for (src, mut rs) in targets {
+            rs.sort_by_key(|r| match *r {
+                Reader::Gate(c) => (depth[c as usize], c, 0usize),
+                Reader::Dff(i) => (u32::MAX, i as u32, 1),
+                Reader::Out(p, b) => (u32::MAX, p as u32, 2 + b),
+                Reader::Done => (u32::MAX, u32::MAX, 0),
+            });
+            let groups = rs.len().div_ceil(max_fanout);
+            let per = rs.len().div_ceil(groups);
+            for chunk in rs.chunks(per).skip(1) {
+                let inv = self.sigs.len() as Sig;
+                self.sigs.push(Src::Nor(vec![src]));
+                let buf = self.sigs.len() as Sig;
+                self.sigs.push(Src::Nor(vec![inv]));
+                made += 1;
+                for r in chunk {
+                    match *r {
+                        Reader::Gate(c) => {
+                            if let Src::Nor(v) = &mut self.sigs[c as usize] {
+                                for o in v.iter_mut() {
+                                    if *o == src {
+                                        *o = buf;
+                                    }
+                                }
+                                v.sort_unstable();
+                            }
+                        }
+                        Reader::Dff(i) => self.dffs[i].d = buf,
+                        Reader::Out(p, b) => self.outputs[p].1[b] = buf,
+                        Reader::Done => self.done = buf,
+                    }
+                }
+            }
+        }
+        made
+    }
+
     /// The most readers any NOR gate has.
     pub fn max_nor_fanout(&self) -> usize {
         let mut n: HashMap<Sig, usize> = HashMap::new();
