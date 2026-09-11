@@ -22,7 +22,7 @@ use crate::netlist::{Netlist, Sig, Src};
 use crate::route::Router;
 use crate::tech::{stamp_dff, stamp_lamp, stamp_lever, stamp_nor, DffPorts, NorCell};
 use crate::world::{Block, Dir, Grid, Material, Pos};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Vertical pitch between logic levels. A cell body needs 4 (`y-1 ..= y+2`),
 /// so this leaves `LEVEL_H - 4` free Y layers between rows for crossings.
@@ -1081,6 +1081,29 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     // connections to 67: the design was navigating a field of orphaned relays.
     // Snapshotting the grid and the router before any routing happens, and
     // restoring both, is the only way to get a genuinely clean pass.
+    // Seed the contention history from a measured map, if one is given.
+    //
+    // The map comes from `OHMC_ISOLATE` with `OHMC_WRITE_CONGESTION`: every
+    // connection routed alone, and each cell counted by how many connections'
+    // keepout footprints it falls in. A cell wanted by one connection costs
+    // nothing extra; a cell wanted by k costs `OHMC_SEED_W * (k - 1)`. This is
+    // the signal the failure-site charge only guessed at - where connections
+    // actually compete, measured before any of them has taken anything.
+    if let Ok(path) = std::env::var("OHMC_SEED_HISTORY") {
+        let w: i32 = std::env::var("OHMC_SEED_W").ok().and_then(|v| v.parse().ok()).unwrap_or(2);
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+        let mut h: HashMap<Pos, i32> = HashMap::new();
+        for line in text.lines() {
+            let f: Vec<i32> = line.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+            if let [x, y, z, n] = f[..] {
+                if n > 1 {
+                    h.insert((x, y, z), w * (n - 1));
+                }
+            }
+        }
+        eprintln!("seeded history from {path}: {} contested cells at weight {w}", h.len());
+        router.seed_history(h);
+    }
     let grid_snapshot = grid.clone();
     let router_snapshot = router.clone();
     let all_work: Vec<(Sig, usize, Sig)> = work.iter().map(|&(g, j, s, _)| (g, j, s)).collect();
@@ -1096,6 +1119,8 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     // to find out.
     let isolate = std::env::var("OHMC_ISOLATE").is_ok();
     let mut iso_ok = 0usize;
+    // How many connections' keepout footprints each cell falls in.
+    let mut demand: HashMap<Pos, i32> = HashMap::new();
     let mut iso_fail: Vec<(Sig, usize, Sig, String)> = Vec::new();
     let iso_kind = |e: &str| -> &'static str {
         if e.contains("no flat run") {
@@ -1444,6 +1469,25 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             Ok(()) => {
                 if isolate {
                     iso_ok += 1;
+                    // A connection's footprint is its wire plus the cells where
+                    // another net's wire would short it: the slope neighbourhood
+                    // and two levels up and down the same column. Counted once
+                    // per connection, however many of its cells touch a cell.
+                    let mut fp: HashSet<Pos> = HashSet::new();
+                    for p in router.take_commit_log() {
+                        fp.insert(p);
+                        for d in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                            for dy in [-1, 0, 1] {
+                                fp.insert((p.0 + d.0, p.1 + dy, p.2 + d.1));
+                            }
+                        }
+                        for dy in [-2, -1, 1, 2] {
+                            fp.insert((p.0, p.1 + dy, p.2));
+                        }
+                    }
+                    for c in fp {
+                        *demand.entry(c).or_default() += 1;
+                    }
                     continue;
                 }
                 routed += 1;
@@ -1547,6 +1591,24 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         eprintln!("  across {} nets; worst {:?}", worst.len(), &worst[..worst.len().min(8)]);
         for (g, j, s, e) in iso_fail.iter().take(5) {
             eprintln!("  e.g. net {s} -> gate {g} input {j}: {}", e.lines().next().unwrap_or(""));
+        }
+        let mut hist = [0usize; 6];
+        let mut max = 0;
+        for &n in demand.values() {
+            max = max.max(n);
+            let b = match n { 1 => 0, 2 => 1, 3 => 2, 4..=5 => 3, 6..=9 => 4, _ => 5 };
+            hist[b] += 1;
+        }
+        eprintln!(
+            "demand: {} cells touched; wanted by 1: {}, 2: {}, 3: {}, 4-5: {}, 6-9: {}, 10+: {}; max {max}",
+            demand.len(), hist[0], hist[1], hist[2], hist[3], hist[4], hist[5]
+        );
+        if let Ok(path) = std::env::var("OHMC_WRITE_CONGESTION") {
+            let mut cells: Vec<(&Pos, &i32)> = demand.iter().filter(|(_, &n)| n > 1).collect();
+            cells.sort();
+            let text: String = cells.iter().map(|(p, n)| format!("{} {} {} {}\n", p.0, p.1, p.2, n)).collect();
+            std::fs::write(&path, text).map_err(|e| format!("{path}: {e}"))?;
+            eprintln!("wrote {} contested cells to {path}", cells.len());
         }
         return Err("isolation survey complete".to_string());
     }

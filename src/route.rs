@@ -51,6 +51,9 @@ pub struct Router {
     ///
     /// Empty by default, so a single-pass placement behaves exactly as before.
     history: HashMap<Pos, i32>,
+    /// Every wire cell `commit` has written, in order. Read by the isolation
+    /// survey to learn each connection's footprint without diffing grids.
+    commit_log: Vec<Pos>,
     /// Dust cells already placed, and which net owns them.
     owner: HashMap<Pos, NetId>,
     /// Cells no dust may ever occupy: cell bodies, and the clearance above
@@ -157,6 +160,7 @@ impl Router {
             blocked: HashSet::new(),
             scratch: HashSet::new(),
             history: HashMap::new(),
+            commit_log: Vec::new(),
             max_expansions: 250_000,
         };
         for (&p, &b) in grid.iter() {
@@ -403,6 +407,16 @@ impl Router {
     /// Carry accumulated contention into a fresh router for the next pass.
     pub fn inherit_history(&mut self, from: &Router) {
         self.history = from.history.clone();
+    }
+
+    /// Drain the log of cells committed since it was last taken.
+    pub fn take_commit_log(&mut self) -> Vec<Pos> {
+        std::mem::take(&mut self.commit_log)
+    }
+
+    /// Replace the contention history outright, from a measured map.
+    pub fn seed_history(&mut self, history: HashMap<Pos, i32>) {
+        self.history = history;
     }
 
     pub fn history_len(&self) -> usize {
@@ -845,6 +859,7 @@ impl Router {
             }
             self.owner.insert(p, net);
             self.blocked.insert(up(p));
+            self.commit_log.push(p);
         }
         Ok(())
     }
