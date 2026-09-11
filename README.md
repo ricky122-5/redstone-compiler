@@ -613,6 +613,25 @@ way. The other half of the failures changes with the order connections are
 tried in, which is contention between nets, and only a router that stops
 depending on that order removes it.
 
+**Splitting a wide net does not thin its hot spot; it concentrates it.** Before
+spending three hours surveying a transformed netlist, the isolation run measures
+the mechanism a split is supposed to act on - how many connections' footprints
+overlap each cell when every connection is routed alone:
+
+| netlist | contested | cells wanted by 6+ | cells wanted by 10+ | max |
+|---|---|---|---|---|
+| baseline | 37.5% | 43,489 | 4,266 | 16 |
+| cloning, threshold 12 | 37.8% | 44,121 | 4,163 | 18 |
+| buffering, threshold 12 | 35.2% | 51,876 | 5,976 | 21 |
+| both | 36.3% | 52,571 | 8,055 | 20 |
+
+Cloning leaves demand where it was. Buffering lowers contention overall and makes
+the worst cells hotter, and doing both nearly doubles the cells that ten or more
+connections want. A copy of a gate reads exactly the same inputs as the
+original, so placement, which pulls a gate toward its drivers, pulls every copy
+toward the same place; and a buffer's new wires all begin at the original
+source. The funnel moves instead of dividing.
+
 That also says where the ceiling comes from. Each connection can be helped
 by taking room from its neighbours, right up until the neighbours have
 none left to give, and no constant fixes that. What is needed is
