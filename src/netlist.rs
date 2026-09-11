@@ -10,7 +10,7 @@
 //! They are the only cyclic element, so the combinational part of the netlist is
 //! always a DAG - which is what lets the placer levelize it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub type Sig = u32;
 
@@ -56,6 +56,12 @@ pub struct Netlist {
     pub outputs: Vec<(String, Vec<Sig>)>,
     /// Asserted when the machine has halted.
     pub done: Sig,
+    /// Gates made by splitting a wide net - clones, the originals they were
+    /// split from, and buffer pairs. Placement puts these by their readers
+    /// alone: a copy reads exactly the same inputs as the gate it copies, so
+    /// weighting its drivers pulls every copy back to the same spot, and the
+    /// funnel the split was meant to break reappears one step along.
+    pub replicas: HashSet<Sig>,
 }
 
 impl Netlist {
@@ -377,6 +383,8 @@ impl Netlist {
             for chunk in rs.chunks(per).skip(1) {
                 let copy = self.sigs.len() as Sig;
                 self.sigs.push(self.sigs[g as usize].clone());
+                self.replicas.insert(g);
+                self.replicas.insert(copy);
                 made += 1;
                 for r in chunk {
                     match *r {
@@ -474,6 +482,8 @@ impl Netlist {
                 self.sigs.push(Src::Nor(vec![src]));
                 let buf = self.sigs.len() as Sig;
                 self.sigs.push(Src::Nor(vec![inv]));
+                self.replicas.insert(inv);
+                self.replicas.insert(buf);
                 made += 1;
                 for r in chunk {
                     match *r {

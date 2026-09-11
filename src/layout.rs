@@ -719,6 +719,22 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             // the netlist. Drivers always; consumers too, once pass one has put
             // them somewhere.
             let wish = |g: Sig, at_x: &HashMap<Sig, i32>| -> Option<i64> {
+                // A split copy goes where its own readers are. It reads exactly the
+                // same inputs as every other copy of its gate, so counting its
+                // drivers pulls all the copies back to one place - which is how
+                // cloning and buffering left gcd's hot spots as hot or hotter.
+                if pass > 0 && net.replicas.contains(&g) {
+                    let cs: Vec<i64> = consumers
+                        .get(&g)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|c| at_x.get(c).copied())
+                        .map(|x| x as i64)
+                        .collect();
+                    if !cs.is_empty() {
+                        return Some(cs.iter().sum::<i64>() / cs.len() as i64);
+                    }
+                }
                 let mut xs: Vec<i64> = net
                     .operands(g)
                     .iter()
