@@ -1225,6 +1225,8 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     let rip_budget: u32 =
         std::env::var("OHMC_RIPS").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
     let mut unroutable: Vec<(Sig, usize, Sig)> = Vec::new();
+    // The last error each unroutable connection gave, for `OHMC_SURVEY_WHY`.
+    let mut why: HashMap<(Sig, usize, Sig), String> = HashMap::new();
     // Connections taken off the queue, for the survey's progress line. A survey
     // keeps going past failures, and on `gcd` that is hours of work with nothing
     // printed until the end - so there was no way to tell a run nearly done from
@@ -1690,6 +1692,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             if *tries > rip_budget {
                 if survey {
                     unroutable.push((g, j, src));
+                    why.insert((g, j, src), e);
                     continue;
                 }
                 // Same global rip-up as the final-hop handler below. Both are
@@ -1794,6 +1797,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                 if *tries > rip_budget {
                     if survey {
                         unroutable.push((g, j, src));
+                        why.insert((g, j, src), e);
                         continue;
                     }
                     if restarts < max_restarts {
@@ -1879,6 +1883,34 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             let text: String = v.iter().map(|(g, j, s)| format!("{s} {g} {j}\n")).collect();
             std::fs::write(&path, text).map_err(|e| format!("{path}: {e}"))?;
             eprintln!("wrote {} unroutable connection(s) to {path}", v.len());
+        }
+        // `OHMC_SURVEY_WHY=path` writes each unroutable connection with the
+        // error it last gave, and prints a tally by kind and by where along
+        // the chain it failed. The list alone says which connections fail;
+        // the fix depends on *where*: leaving a crowded driver spine (relay
+        // stage 1), between relays, or on the final approach to a feed stub.
+        if let Ok(path) = std::env::var("OHMC_SURVEY_WHY") {
+            let mut v = unroutable.clone();
+            v.sort();
+            let mut tally: HashMap<(String, &str), usize> = HashMap::new();
+            let mut text = String::new();
+            for c @ (g, j, s) in &v {
+                let e = why.get(c).map(String::as_str).unwrap_or("");
+                let place = match e.strip_prefix("relay stage ") {
+                    Some(rest) if rest.starts_with("1 ") => "leaving the driver (stage 1)".to_string(),
+                    Some(_) => "between relays".to_string(),
+                    None => "final hop into the feed".to_string(),
+                };
+                let kind = iso_kind(e);
+                *tally.entry((place.clone(), kind)).or_default() += 1;
+                text.push_str(&format!("{s} {g} {j}\t{place}\t{kind}\t{}\n", e.lines().next().unwrap_or("")));
+            }
+            std::fs::write(&path, text).map_err(|e| format!("{path}: {e}"))?;
+            let mut t: Vec<_> = tally.into_iter().collect();
+            t.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            for ((place, kind), n) in t {
+                eprintln!("  {n:>4}  {place}: {kind}");
+            }
         }
         if !(repair_rounds > 0 && unroutable.is_empty()) {
             return Err(format!("survey complete: {routed} of {total_conns} routed"));
