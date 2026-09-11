@@ -1654,6 +1654,19 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             "survey: {routed} of {total_conns} routed, {} unroutable (rip-up rounds {rip_budget})",
             unroutable.len()
         );
+        // `OHMC_SURVEY_OUT=path` writes out *which* connections could not be
+        // routed, one `net gate input` per line, sorted. A count cannot say
+        // whether two tie orders lose the same connections or different ones,
+        // and the answers point opposite ways: a set that survives every order
+        // is a structural hard core with a targeted fix, while a set that
+        // changes with the order is contention that no single fix will clear.
+        if let Ok(path) = std::env::var("OHMC_SURVEY_OUT") {
+            let mut v = unroutable.clone();
+            v.sort();
+            let text: String = v.iter().map(|(g, j, s)| format!("{s} {g} {j}\n")).collect();
+            std::fs::write(&path, text).map_err(|e| format!("{path}: {e}"))?;
+            eprintln!("wrote {} unroutable connection(s) to {path}", v.len());
+        }
         return Err(format!("survey complete: {routed} of {total_conns} routed"));
     }
     if isolate {
