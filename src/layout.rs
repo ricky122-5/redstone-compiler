@@ -201,7 +201,32 @@ struct Placed {
 fn hop_is_buildable(a: Pos, b: Pos) -> bool {
     let dv = (a.1 - b.1).abs();
     let dh = (a.0 - b.0).abs() + (a.2 - b.2).abs();
-    dh >= dv + 1 + dv / (crate::tech::MAX_RUN - 1)
+    let (add, div) = slack();
+    dh >= dv + add + dv / div
+}
+
+/// The slack terms of the grade rule, `dh >= dv + add + dv / div`.
+///
+/// `OHMC_SLACK_ADD` and `OHMC_SLACK_DIV` override them. The sweep that settled
+/// on `+1 + dv/11` measured where the first unrecoverable connection fell,
+/// which varies by hundreds across equally valid tie orders - the same metric
+/// that ranked the level cap backwards. It is worth re-measuring by survey,
+/// because a hop at exactly the minimum grade is a staircase with two flat
+/// cells in it, and 33 of `gcd`'s 96 remaining failures are a repeater with
+/// nowhere to sit or a path that doubles back on itself.
+///
+/// Read once: this is called for every candidate relay site.
+fn slack() -> (i32, i32) {
+    static SLACK: std::sync::OnceLock<(i32, i32)> = std::sync::OnceLock::new();
+    *SLACK.get_or_init(|| {
+        let add =
+            std::env::var("OHMC_SLACK_ADD").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+        let div = std::env::var("OHMC_SLACK_DIV")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(crate::tech::MAX_RUN - 1);
+        (add, div.max(1))
+    })
 }
 
 /// The source a hop to `p` will actually leave from: the nearest one.
@@ -1589,7 +1614,8 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                 let dh = (rx - prev.0).abs() + (rz - prev.2).abs();
                 // Enough spare horizontal for a flat cell often enough to hold a
                 // repeater, not merely one block over the fall.
-                let need = dv + 1 + dv / (crate::tech::MAX_RUN - 1) - dh;
+                let (add, div) = slack();
+                let need = dv + add + dv / div - dh;
                 if need > 0 {
                     // Across the direction of travel: out and back buys room for
                     // the next hop too, where extending along the line would
