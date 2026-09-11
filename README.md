@@ -459,6 +459,24 @@ search into a broad one - it fails with "gave up after 250001 expansions" - and
 restricting to the nearest three fixes the small designs without helping the
 large one at all.
 
+**Changing what a failing connection retries does not help.** Two changes that
+touch only connections which have already failed, so neither can disturb what
+already routes:
+
+| retry change | gcd routed |
+|---|---|
+| none | **715** |
+| vary the relay stage count on each retry | 232 |
+| remove a failed attempt's relays before retrying | 332 |
+
+The second looked like a leak: relays are claimed, `rip` spares claimed cells,
+so every failed attempt leaves its chain in the grid. It is not a leak. Those
+relays belong to the net, and the next attempt can attach to them - a retry
+inherits a partial chain instead of rebuilding one. Removing them makes `count`
+place twice as slowly with *more* blocks, which a genuine leak fix cannot do.
+Varying the stage count fails for the same reason from the other side: each
+retry stamps a chain at fresh sites and inherits nothing.
+
 That also says where the ceiling comes from. Each connection can be helped
 by taking room from its neighbours, right up until the neighbours have
 none left to give, and no constant fixes that. What is needed is
