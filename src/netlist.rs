@@ -302,6 +302,125 @@ impl Netlist {
     }
 }
 
+impl Netlist {
+    /// Replicate NOR gates read by more than `max_fanout` signals, splitting
+    /// their readers between the original gate and its copies. Returns how many
+    /// copies were made.
+    ///
+    /// A gate's readers all have to leave from the one place the gate is built,
+    /// and on `gcd` that funnel is what fails to route. `Nor([43])` has 41
+    /// readers; 29 of them pass through the same few blocks south of level 1's
+    /// gate row, and that one net owns 23% of the most contested slab in the
+    /// design. Every connection routes fine alone - they fail by crowding each
+    /// other out of a single exit. A copy of the gate computes the same value
+    /// from the same inputs, so readers can be dealt to copies placed near them,
+    /// and two-pass placement already puts each copy beside its own readers.
+    ///
+    /// Readers are sorted by logic depth before they are split, so each group is
+    /// a contiguous slice of the logic rather than an arbitrary mix, and each
+    /// copy has a coherent place to go.
+    ///
+    /// Copies are pushed straight into `sigs` without touching the hash table:
+    /// interning them would return the original, which is the whole point of
+    /// hash-consing and exactly what this must avoid. Call it only once the
+    /// netlist is complete - a later `nor()` would not see the rewired gates.
+    pub fn clone_high_fanout(&mut self, max_fanout: usize) -> usize {
+        #[derive(Clone, Copy)]
+        enum Reader {
+            Gate(Sig),
+            Dff(usize),
+            Out(usize, usize),
+            Done,
+        }
+        let max_fanout = max_fanout.max(2);
+        let roots = self.roots();
+        let mut depth = vec![0u32; self.sigs.len()];
+        for s in self.topo_order(&roots) {
+            if let Src::Nor(v) = &self.sigs[s as usize] {
+                depth[s as usize] = 1 + v.iter().map(|&o| depth[o as usize]).max().unwrap_or(0);
+            }
+        }
+        let mut readers: HashMap<Sig, Vec<Reader>> = HashMap::new();
+        for (i, src) in self.sigs.iter().enumerate() {
+            if let Src::Nor(v) = src {
+                for &o in v {
+                    readers.entry(o).or_default().push(Reader::Gate(i as Sig));
+                }
+            }
+        }
+        for (i, d) in self.dffs.iter().enumerate() {
+            readers.entry(d.d).or_default().push(Reader::Dff(i));
+        }
+        for (p, (_, bits)) in self.outputs.iter().enumerate() {
+            for (b, &s) in bits.iter().enumerate() {
+                readers.entry(s).or_default().push(Reader::Out(p, b));
+            }
+        }
+        readers.entry(self.done).or_default().push(Reader::Done);
+
+        let mut targets: Vec<(Sig, Vec<Reader>)> = readers
+            .into_iter()
+            .filter(|(s, r)| matches!(self.sigs[*s as usize], Src::Nor(_)) && r.len() > max_fanout)
+            .collect();
+        targets.sort_by_key(|(s, _)| *s);
+
+        let mut made = 0;
+        for (g, mut rs) in targets {
+            rs.sort_by_key(|r| match *r {
+                Reader::Gate(c) => (depth[c as usize], c, 0usize),
+                Reader::Dff(i) => (u32::MAX, i as u32, 1),
+                Reader::Out(p, b) => (u32::MAX, p as u32, 2 + b),
+                Reader::Done => (u32::MAX, u32::MAX, 0),
+            });
+            let groups = rs.len().div_ceil(max_fanout);
+            let per = rs.len().div_ceil(groups);
+            for chunk in rs.chunks(per).skip(1) {
+                let copy = self.sigs.len() as Sig;
+                self.sigs.push(self.sigs[g as usize].clone());
+                made += 1;
+                for r in chunk {
+                    match *r {
+                        Reader::Gate(c) => {
+                            if let Src::Nor(v) = &mut self.sigs[c as usize] {
+                                for o in v.iter_mut() {
+                                    if *o == g {
+                                        *o = copy;
+                                    }
+                                }
+                                v.sort_unstable();
+                            }
+                        }
+                        Reader::Dff(i) => self.dffs[i].d = copy,
+                        Reader::Out(p, b) => self.outputs[p].1[b] = copy,
+                        Reader::Done => self.done = copy,
+                    }
+                }
+            }
+        }
+        made
+    }
+
+    /// The most readers any NOR gate has.
+    pub fn max_nor_fanout(&self) -> usize {
+        let mut n: HashMap<Sig, usize> = HashMap::new();
+        for src in &self.sigs {
+            if let Src::Nor(v) = src {
+                for &o in v {
+                    *n.entry(o).or_default() += 1;
+                }
+            }
+        }
+        for d in &self.dffs {
+            *n.entry(d.d).or_default() += 1;
+        }
+        n.iter()
+            .filter(|(s, _)| matches!(self.sigs[**s as usize], Src::Nor(_)))
+            .map(|(_, &c)| c)
+            .max()
+            .unwrap_or(0)
+    }
+}
+
 /// Evaluate the combinational network for one clock cycle.
 pub struct GateSim<'n> {
     pub net: &'n Netlist,

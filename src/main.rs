@@ -135,10 +135,19 @@ fn run(args: &[String]) -> Result<(), String> {
         // Straight-line programs place from the combinational lowering, which
         // has no FSM and no registers. Anything with a loop or a branch needs
         // the sequential netlist and the register bank that goes with it.
-        let placed_net = match bitblast::blast_combinational(&design) {
+        let mut placed_net = match bitblast::blast_combinational(&design) {
             Ok(comb) => comb,
             Err(_) => bitblast::blast(&design),
         };
+        // Split any NOR gate with more readers than this between copies of it.
+        if let Some(t) = std::env::var("OHMC_CLONE").ok().and_then(|v| v.parse::<usize>().ok()) {
+            let before = placed_net.max_nor_fanout();
+            let made = placed_net.clone_high_fanout(t);
+            eprintln!(
+                "cloned {made} gate copy(s): max NOR fan-out {before} -> {}",
+                placed_net.max_nor_fanout()
+            );
+        }
         let layout = layout::build(&placed_net)?;
         // The control levers are reported in the same frame as everything else
         // the caller is given, which means the *.mcfunction* frame when one is
