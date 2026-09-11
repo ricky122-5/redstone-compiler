@@ -182,7 +182,14 @@ impl Router {
             commit_log: Vec::new(),
             journal: None,
             net_undo: HashMap::new(),
-            max_expansions: 250_000,
+            // `OHMC_EXPANSIONS` overrides the per-search cap. A third of the
+            // connections `gcd` cannot route end at exactly this many
+            // expansions, so whether they are slow or genuinely walled in is
+            // worth measuring rather than assuming.
+            max_expansions: std::env::var("OHMC_EXPANSIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(250_000),
         };
         for (&p, &b) in grid.iter() {
             if b != Block::Air {
