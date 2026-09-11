@@ -1085,7 +1085,38 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     let router_snapshot = router.clone();
     let all_work: Vec<(Sig, usize, Sig)> = work.iter().map(|&(g, j, s, _)| (g, j, s)).collect();
     let mut done: Vec<(Sig, usize, Sig)> = Vec::new();
+    // `OHMC_ISOLATE` routes every connection alone, against the structure-only
+    // snapshot - gates, spines and stubs, but no other net's wire - and counts.
+    //
+    // It answers whether the connections that fail are failing because of each
+    // other or because of the placement. If nearly all of them route when they
+    // have the grid to themselves, the failures are inter-net contention, which
+    // a negotiated router can resolve. If many fail even alone, no router will:
+    // the problem is upstream. That is worth knowing before rewriting the router
+    // to find out.
+    let isolate = std::env::var("OHMC_ISOLATE").is_ok();
+    let mut iso_ok = 0usize;
+    let mut iso_fail: Vec<(Sig, usize, Sig, String)> = Vec::new();
+    let iso_kind = |e: &str| -> &'static str {
+        if e.contains("no flat run") {
+            "no flat run for a repeater"
+        } else if e.contains("collides with itself") {
+            "path collides with itself"
+        } else if e.contains("gave up after") {
+            "search budget exhausted"
+        } else if e.contains("no clear relay site") {
+            "no clear relay site"
+        } else if e.contains("no route") {
+            "no route at all"
+        } else {
+            "other"
+        }
+    };
     while let Some((g, j, src)) = queue.pop_front() {
+        if isolate {
+            grid = grid_snapshot.clone();
+            router = router_snapshot.clone();
+        }
         let feed = stub_entry[&(g, j)];
         let sources = spine
             .get(&src)
@@ -1351,6 +1382,10 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         // stage routes to it. Rip-up covered only the last hop, so those
         // failures were fatal even though the space was recoverable.
         if let Some(e) = stage_err {
+            if isolate {
+                iso_fail.push((g, j, src, e));
+                continue;
+            }
             let tries = rips.entry((g, j)).or_insert(0);
             *tries += 1;
             if *tries > 6 {
@@ -1407,10 +1442,18 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         }
         match router.route(&mut grid, src, &from, feed, bounds, Material::Wire, carry) {
             Ok(()) => {
+                if isolate {
+                    iso_ok += 1;
+                    continue;
+                }
                 routed += 1;
                 done.push((g, j, src));
             }
             Err(e) => {
+                if isolate {
+                    iso_fail.push((g, j, src, e));
+                    continue;
+                }
                 let tries = rips.entry((g, j)).or_insert(0);
                 *tries += 1;
                 if *tries > 6 {
@@ -1479,6 +1522,35 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             }
         }
     }
+
+    if isolate {
+        let total = iso_ok + iso_fail.len();
+        eprintln!(
+            "isolation: {iso_ok} of {total} connections route alone against the structure; {} do not",
+            iso_fail.len()
+        );
+        let mut kinds: HashMap<&str, usize> = HashMap::new();
+        for (_, _, _, e) in &iso_fail {
+            *kinds.entry(iso_kind(e)).or_default() += 1;
+        }
+        let mut kv: Vec<(&str, usize)> = kinds.into_iter().collect();
+        kv.sort_by_key(|&(k, n)| (std::cmp::Reverse(n), k));
+        for (k, n) in kv {
+            eprintln!("  {n:>4}  {k}");
+        }
+        let mut by_net: HashMap<Sig, usize> = HashMap::new();
+        for (_, _, s, _) in &iso_fail {
+            *by_net.entry(*s).or_default() += 1;
+        }
+        let mut worst: Vec<(Sig, usize)> = by_net.into_iter().collect();
+        worst.sort_by_key(|&(s, n)| (std::cmp::Reverse(n), s));
+        eprintln!("  across {} nets; worst {:?}", worst.len(), &worst[..worst.len().min(8)]);
+        for (g, j, s, e) in iso_fail.iter().take(5) {
+            eprintln!("  e.g. net {s} -> gate {g} input {j}: {}", e.lines().next().unwrap_or(""));
+        }
+        return Err("isolation survey complete".to_string());
+    }
+
 
     // Outputs: route each bit out to the lamp reserved for it.
     let mut output_lamps: Vec<(String, Vec<Pos>)> = Vec::new();
