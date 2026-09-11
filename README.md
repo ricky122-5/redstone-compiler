@@ -501,6 +501,32 @@ failed. It was applied around a connection that had *failed*, which is where a
 route gave up and not where the contention is; that was a guess at a signal
 that can now be measured directly.
 
+**The routed-connection count is noise-dominated, and most of the comparisons
+above are inside the noise.** `OHMC_TIE_SEED` reorders connections of equal
+difficulty and changes nothing else - same netlist, same placement, same
+hardest-first policy, every order as valid as the default:
+
+| tie order | `gcd` routed |
+|---|---|
+| default | 715 |
+| seed 3 | 683 |
+| seed 2 | 419 |
+| seed 4 | 343 |
+| seed 1 | 238 |
+
+An equally valid order moves the result by about 480 connections. Nearly every
+variant recorded in the tables above lands inside that range, so none of them
+has been shown to be better or worse than the default by a single run - and
+that includes the one recorded win, the eviction radius going from 24 to 40
+(330 to 715). The default's 715 is the top of its own spread.
+
+The reason is the metric. "N of 1103 routed" is where, in the work order, the
+*first* connection that cannot be recovered happens to fall. That is not how
+many connections can be routed, and where the first wall is hit is exactly
+the thing a different order changes. What the numbers support is narrower:
+every connection routes alone, they fail by crowding each other, and which one
+fails first is close to arbitrary.
+
 That also says where the ceiling comes from. Each connection can be helped
 by taking room from its neighbours, right up until the neighbours have
 none left to give, and no constant fixes that. What is needed is
