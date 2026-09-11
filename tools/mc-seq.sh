@@ -36,6 +36,16 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OHMC="$REPO/target/release/ohmc"
 
 [ -x "$OHMC" ] || { echo "build first: cargo build --release"; exit 1; }
+# Refuse a binary older than the source it was built from.
+#
+# `cargo build --release --examples` rebuilds the library and the examples and
+# can leave this binary behind. A run then validates code that no longer exists,
+# and passes or fails for reasons unrelated to the change being tested. That
+# happened three times in one session before this check existed.
+NEWEST_SRC=$(find "$REPO/src" -name '*.rs' -exec stat -f %m {} + | sort -n | tail -1)
+if [ "$(stat -f %m "$OHMC")" -lt "$NEWEST_SRC" ]; then
+  echo "$OHMC is older than the source - run: cargo build --release"; exit 1
+fi
 mkdir -p "$D"
 
 INFO=$("$OHMC" "$OHM" --mcfn "$D/circuit.mcfunction") || exit 1
@@ -242,7 +252,21 @@ echo "spawnChunkRadius $RAD (covers +/-$((RAD*16)) blocks)"
 # which is why it validated in game and this did not.
 send "gamerule maxCommandChainLength 10000000" 2
 send "gamerule spawnChunkRadius $RAD" 2
-send "forceload add $MINX $MINZ $BX $BZ" 2
+# Force-load in tiles, never one rectangle.
+#
+# A single `forceload add` is refused outright past 256 chunks, and the refusal
+# is easy to miss in a server log. Everything outside a loaded chunk still accepts
+# setblock and answers probes - it just never runs redstone - which reads as a
+# fixed wrong answer rather than a failure. `gcd` is well over a thousand blocks
+# across, so the whole area is tiled into 16x16-chunk requests.
+for tx in $(seq $(( (MINX>>4) )) 16 $(( (BX>>4) ))); do
+  for tz in $(seq $(( (MINZ>>4) )) 16 $(( (BZ>>4) ))); do
+    x0=$((tx*16)); z0=$((tz*16)); x1=$(((tx+15)*16+15)); z1=$(((tz+15)*16+15))
+    [ $x1 -gt $BX ] && x1=$BX; [ $z1 -gt $BZ ] && z1=$BZ
+    send "forceload add $x0 $z0 $x1 $z1" 0
+  done
+done
+sleep 2
 send "reload" 3
 send "execute positioned 0.0 0.0 0.0 run function ohm:circuit" 5
 
@@ -298,8 +322,20 @@ NLEV=$(echo "$LEVERS" | grep -c .)
 FULL=$((1 << NLEV))
 CASES=${OHMC_CASES:-$FULL}
 [ "$CASES" -le "$FULL" ] || CASES=$FULL
+# Explicit input values, when a sweep from zero is not the question.
+#
+# `gcd.ohm`'s acceptance case is a=48, b=18, which is the single value
+# 48 | 18 << 8 = 4656 - a sweep of the first N values would never reach it.
+# `OHMC_INPUTS` takes the flat values (comma or space separated), split across
+# ports in lever order exactly as the sweep does.
+if [ -n "${OHMC_INPUTS:-}" ]; then
+  VALUES=$(echo "$OHMC_INPUTS" | tr ',' ' ')
+else
+  VALUES=$(seq 0 $((CASES-1)))
+fi
+CASES=$(echo $VALUES | wc -w | tr -d ' ')
 echo "running $CASES of $FULL input value(s), $CYCLES cycles each"
-for v in $(seq 0 $((CASES-1))); do run_input "$v"; done
+for v in $VALUES; do run_input "$v"; done
 
 send "stop" 3
 wait $SRV 2>/dev/null
@@ -315,7 +351,7 @@ echo "=== observed in Minecraft vs. the golden model ==="
 # bit widths can both be read straight off it, and a value is split across ports
 # in the same lever order the sweep drives them.
 PORTS=$(echo "$INFO" | sed -n 's/^  input  \([A-Za-z_][A-Za-z0-9_]*\)\[\([0-9]*\)\].*/\1 \2/p')
-for v in $(seq 0 $((CASES-1))); do
+for v in $VALUES; do
   ARGS=$(python3 - "$v" <<PYP
 import sys, collections
 v = int(sys.argv[1])
