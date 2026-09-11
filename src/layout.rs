@@ -1139,6 +1139,23 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     // the problem is upstream. That is worth knowing before rewriting the router
     // to find out.
     let isolate = std::env::var("OHMC_ISOLATE").is_ok();
+    // `OHMC_SURVEY` keeps going past a connection that cannot be recovered, and
+    // reports how many route in the end.
+    //
+    // The ordinary stopping point is the first such connection, and "N of 1103
+    // routed" is therefore where that one happened to fall in the work order -
+    // which is what a different tie order changes most. Across equally valid
+    // orders it ranged from 238 to 715, and each order failed first on a
+    // different connection. Counting everything that routes is the quantity
+    // that actually tracks progress toward all of them routing.
+    //
+    // `OHMC_RIPS` sets how many rip-up rounds a connection gets before it is
+    // given up on. Hold it and `OHMC_ATTEMPTS` fixed between builds being
+    // compared; lower values make a survey run in minutes rather than hours.
+    let survey = std::env::var("OHMC_SURVEY").is_ok();
+    let rip_budget: u32 =
+        std::env::var("OHMC_RIPS").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+    let mut unroutable: Vec<(Sig, usize, Sig)> = Vec::new();
     let mut iso_ok = 0usize;
     // How many connections' keepout footprints each cell falls in.
     let mut demand: HashMap<Pos, i32> = HashMap::new();
@@ -1444,7 +1461,11 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             }
             let tries = rips.entry((g, j)).or_insert(0);
             *tries += 1;
-            if *tries > 6 {
+            if *tries > rip_budget {
+                if survey {
+                    unroutable.push((g, j, src));
+                    continue;
+                }
                 // Same global rip-up as the final-hop handler below. Both are
                 // needed: a staged connection can exhaust local eviction on any
                 // of its relay hops, and on `gcd` that is where it actually
@@ -1542,7 +1563,11 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                 }
                 let tries = rips.entry((g, j)).or_insert(0);
                 *tries += 1;
-                if *tries > 6 {
+                if *tries > rip_budget {
+                    if survey {
+                        unroutable.push((g, j, src));
+                        continue;
+                    }
                     if restarts < max_restarts {
                         restarts += 1;
                         // Charge the ground that refused this route, then make
@@ -1609,6 +1634,13 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         }
     }
 
+    if survey {
+        eprintln!(
+            "survey: {routed} of {total_conns} routed, {} unroutable (rip-up rounds {rip_budget})",
+            unroutable.len()
+        );
+        return Err(format!("survey complete: {routed} of {total_conns} routed"));
+    }
     if isolate {
         let total = iso_ok + iso_fail.len();
         eprintln!(
