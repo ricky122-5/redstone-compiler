@@ -1121,6 +1121,16 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     let mut iso_ok = 0usize;
     // How many connections' keepout footprints each cell falls in.
     let mut demand: HashMap<Pos, i32> = HashMap::new();
+    // `OHMC_HOTBOX=x0,x1,y0,y1,z0,z1`: which connections' footprints enter a box.
+    //
+    // The demand map says a region is contested but not by whom, and the two
+    // answers want different fixes - a handful of nets owning a hot spot can be
+    // spread out, while hundreds passing through one can only be negotiated.
+    let hotbox: Option<[i32; 6]> = std::env::var("OHMC_HOTBOX").ok().and_then(|v| {
+        let f: Vec<i32> = v.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+        f.try_into().ok()
+    });
+    let mut hot_users: Vec<(Sig, Sig, usize, usize)> = Vec::new();
     let mut iso_fail: Vec<(Sig, usize, Sig, String)> = Vec::new();
     let iso_kind = |e: &str| -> &'static str {
         if e.contains("no flat run") {
@@ -1485,6 +1495,17 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                             fp.insert((p.0, p.1 + dy, p.2));
                         }
                     }
+                    if let Some([x0, x1, y0, y1, z0, z1]) = hotbox {
+                        let inside = fp
+                            .iter()
+                            .filter(|p| {
+                                (x0..=x1).contains(&p.0) && (y0..=y1).contains(&p.1) && (z0..=z1).contains(&p.2)
+                            })
+                            .count();
+                        if inside > 0 {
+                            hot_users.push((src, g, j, inside));
+                        }
+                    }
                     for c in fp {
                         *demand.entry(c).or_default() += 1;
                     }
@@ -1603,6 +1624,33 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             "demand: {} cells touched; wanted by 1: {}, 2: {}, 3: {}, 4-5: {}, 6-9: {}, 10+: {}; max {max}",
             demand.len(), hist[0], hist[1], hist[2], hist[3], hist[4], hist[5]
         );
+        if hotbox.is_some() {
+            let mut by_net: HashMap<Sig, (usize, usize)> = HashMap::new();
+            for &(s, _, _, n) in &hot_users {
+                let e = by_net.entry(s).or_default();
+                e.0 += 1;
+                e.1 += n;
+            }
+            let mut v: Vec<(Sig, (usize, usize))> = by_net.into_iter().collect();
+            v.sort_by_key(|&(s, (c, n))| (std::cmp::Reverse(n), c, s));
+            let total_cells: usize = v.iter().map(|&(_, (_, n))| n).sum();
+            eprintln!(
+                "hotbox: {} connections from {} nets enter it, {} footprint cells in total",
+                hot_users.len(),
+                v.len(),
+                total_cells
+            );
+            let mut run = 0usize;
+            for (i, &(s, (c, n))) in v.iter().enumerate() {
+                run += n;
+                if i < 12 {
+                    eprintln!("  net {s:>4}: {c:>3} connection(s), {n:>5} cells  (cumulative {}%)", 100 * run / total_cells.max(1));
+                }
+            }
+            let half = v.iter().scan(0usize, |a, &(_, (_, n))| { *a += n; Some(*a) })
+                .position(|a| a * 2 >= total_cells).map_or(0, |p| p + 1);
+            eprintln!("  half of the slab's footprint belongs to the top {half} nets");
+        }
         if let Ok(path) = std::env::var("OHMC_WRITE_CONGESTION") {
             let mut cells: Vec<(&Pos, &i32)> = demand.iter().filter(|(_, &n)| n > 1).collect();
             cells.sort();
