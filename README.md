@@ -477,6 +477,30 @@ place twice as slowly with *more* blocks, which a genuine leak fix cannot do.
 Varying the stage count fails for the same reason from the other side: each
 retry stamps a chain at fresh sites and inherits nothing.
 
+**Every connection routes on its own; they fail because of each other.**
+`OHMC_ISOLATE=1` routes each connection alone against the structure-only grid -
+gates, spines and stubs, but no other net's wire - and counts:
+
+| design | routes together | routes alone |
+|---|---|---|
+| `tick` | 141 of 141 | 140 of 141 |
+| `count` | 233 of 233 | 231 of 233 |
+| `gcd` | 715 of 1103 | **1100 of 1103** |
+
+The first two rows calibrate the instrument: both designs place fully, so the
+one or two failures in isolation are its error, and it errs conservative (a
+real run retries a failed connection after rip-up; isolation gives each one
+pass). `gcd`'s three failures are inside that error.
+
+So the placement is routable, and roughly 385 connections fail purely through
+contention with other nets. That retires every placement hypothesis above -
+the array is not too wide to route and the wires are not too long - and it
+explains why none of the placement and tuning variants helped: they perturbed a
+layout that was never the problem. It also says why the congestion charge
+failed. It was applied around a connection that had *failed*, which is where a
+route gave up and not where the contention is; that was a guess at a signal
+that can now be measured directly.
+
 That also says where the ceiling comes from. Each connection can be helped
 by taking room from its neighbours, right up until the neighbours have
 none left to give, and no constant fixes that. What is needed is
