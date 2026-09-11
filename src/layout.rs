@@ -1259,7 +1259,122 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             "other"
         }
     };
-    while let Some((g, j, src)) = queue.pop_front() {
+    // `OHMC_REPAIR=rounds` goes back over a survey's failures once the queue is
+    // empty. For each one it rips up the nets crowding it, routes it, and
+    // re-routes everything the rip removed; the result is kept only if fewer
+    // connections are left unroutable than before, and otherwise the grid and
+    // router are restored from a snapshot. `OHMC_REPAIR_K` is how many
+    // crowding nets a trial may rip (default 2).
+    //
+    // Ordinary rip-up evicts and hopes: it never checks whether the evicted
+    // nets found somewhere else to go, so it can trade one connection for
+    // several and cascade. A trial that makes things worse is simply undone -
+    // which is only safe because routing is all-or-nothing and rip-up takes
+    // back exactly what a net built.
+    //
+    // A round that keeps nothing ends the repair. If every connection ends up
+    // routed, the survey carries on and builds the design.
+    struct Trial {
+        grid: Grid,
+        router: Router,
+        done: Vec<(Sig, usize, Sig)>,
+        unroutable: Vec<(Sig, usize, Sig)>,
+        routed: usize,
+        target: (Sig, usize, Sig),
+        ripped: usize,
+    }
+    let repair_rounds: u32 =
+        std::env::var("OHMC_REPAIR").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let repair_k: usize =
+        std::env::var("OHMC_REPAIR_K").ok().and_then(|v| v.parse().ok()).unwrap_or(2);
+    let mut repair_round = 0u32;
+    let mut repair_kept = 0usize;
+    let mut repair_work: Vec<(Sig, usize, Sig)> = Vec::new();
+    let mut trial: Option<Trial> = None;
+    loop {
+        let Some((g, j, src)) = queue.pop_front() else {
+            if !survey || repair_rounds == 0 {
+                break;
+            }
+            if let Some(t) = trial.take() {
+                let before = t.unroutable.len();
+                let kept = unroutable.len() < before;
+                eprintln!(
+                    "repair round {repair_round}: net {} into gate {} input {}, re-routed {} ripped \
+                     connection(s): unroutable {before} -> {} {}",
+                    t.target.2,
+                    t.target.0,
+                    t.target.1,
+                    t.ripped,
+                    unroutable.len(),
+                    if kept { "kept" } else { "undone" }
+                );
+                if kept {
+                    repair_kept += 1;
+                } else {
+                    grid = t.grid;
+                    router = t.router;
+                    done = t.done;
+                    unroutable = t.unroutable;
+                    routed = t.routed;
+                }
+            }
+            let target = loop {
+                if let Some(c) = repair_work.pop() {
+                    if unroutable.contains(&c) {
+                        break Some(c);
+                    }
+                    continue;
+                }
+                if repair_round < repair_rounds
+                    && (repair_round == 0 || repair_kept > 0)
+                    && !unroutable.is_empty()
+                {
+                    repair_round += 1;
+                    repair_kept = 0;
+                    repair_work = unroutable.iter().rev().copied().collect();
+                    eprintln!(
+                        "repair round {repair_round}: {} unroutable, {routed} routed",
+                        unroutable.len()
+                    );
+                    continue;
+                }
+                break None;
+            };
+            let Some((tg, tj, ts)) = target else { break };
+            let snapshot = Trial {
+                grid: grid.clone(),
+                router: router.clone(),
+                done: done.clone(),
+                unroutable: unroutable.clone(),
+                routed,
+                target: (tg, tj, ts),
+                ripped: 0,
+            };
+            unroutable.retain(|&c| c != (tg, tj, ts));
+            let feed = stub_entry[&(tg, tj)];
+            let near = nearest_source(&spine[&ts], feed);
+            let mut victims = router.crowders(feed, 40, ts);
+            for v in router.crowders(near, 36, ts) {
+                if !victims.contains(&v) {
+                    victims.push(v);
+                }
+            }
+            // Only nets with routed connections have anything to give up.
+            victims.retain(|v| done.iter().any(|&(_, _, s)| s == *v));
+            let mut ripped = 0;
+            for v in victims.into_iter().take(repair_k) {
+                router.rip(&mut grid, v);
+                let (again, keep): (Vec<_>, Vec<_>) = done.iter().partition(|&&(_, _, s)| s == v);
+                done = keep;
+                routed -= again.len();
+                ripped += again.len();
+                queue.extend(again);
+            }
+            queue.push_front((tg, tj, ts));
+            trial = Some(Trial { ripped, ..snapshot });
+            continue;
+        };
         if isolate {
             grid = grid_snapshot.clone();
             router = router_snapshot.clone();
@@ -1765,7 +1880,10 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             std::fs::write(&path, text).map_err(|e| format!("{path}: {e}"))?;
             eprintln!("wrote {} unroutable connection(s) to {path}", v.len());
         }
-        return Err(format!("survey complete: {routed} of {total_conns} routed"));
+        if !(repair_rounds > 0 && unroutable.is_empty()) {
+            return Err(format!("survey complete: {routed} of {total_conns} routed"));
+        }
+        eprintln!("repair routed every connection; building the design");
     }
     if isolate {
         let total = iso_ok + iso_fail.len();
