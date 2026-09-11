@@ -20,14 +20,16 @@ source .ohm
 
 ## Verified in unmodified Minecraft
 
-| design | gates | inputs | in-game result |
-|---|---|---|---|
-| `invert.ohm` | 20 | 1 | all cases, both sweep directions |
-| `andgate.ohm` | 23 | 2 | all cases, both sweep directions |
-| `add2.ohm` | 51 | 4 | all 16 cases, both sweep directions |
-| `add.ohm` | 195 | 16 | 10 sampled of 65536, both directions, exact |
+| design | gates | flip-flops | inputs | in-game result |
+|---|---|---|---|---|
+| `invert.ohm` | 20 | 0 | 1 | all cases, both sweep directions (earlier compiler) |
+| `andgate.ohm` | 23 | 0 | 2 | all cases, both sweep directions (earlier compiler) |
+| `add2.ohm` | 51 | 0 | 4 | all 16 cases, both sweep directions (earlier compiler) |
+| `add.ohm` | 195 | 0 | 16 | 24 sampled of 65536, both directions, re-checked on the current compiler |
+| `tick.ohm` | 99 | 11 | 1 | both inputs, halting on the cycle the golden model predicts |
+| `count.ohm` | 165 | 15 | 2 | all four inputs, state vector matching the simulator register for register |
 
-`add.ohm` is 24652 blocks. Designs wider than a few inputs are sampled rather
+`add.ohm` is 24098 blocks. Designs wider than a few inputs are sampled rather
 than enumerated - `OHMC_MAXCASES` sets how many - and every sweep is run twice,
 ascending then descending, because a circuit that answers differently the second
 time is holding state a combinational design must not have.
@@ -72,7 +74,11 @@ after the router took that job over. Every constant in it is a measured floor:
 at a tighter pitch the latch will not store a 1, at a closer offset the R gate's
 feed is walled in completely.
 
-`gcd.ohm` (724 gates, 42 flip-flops) has not been attempted at this size yet.
+`gcd.ohm` (724 gates, 42 flip-flops) does not place yet. Every one of its 1103
+connections routes when it has the grid to itself; routed together, one
+attempt each and no rip-up, 806 to 827 do, depending on the order they are
+tried in. About half the failures are the same in every order and sit on a few
+very wide nets; the other half move with the order. See the status section.
 
 ## Quick start
 
@@ -570,6 +576,42 @@ show first, and the replay reproduces the drop to the connection. This was worth
 checking rather than assuming: the original run had used 70 CPU-minutes to reach
 a point this one reached in 21, a gap large enough to suggest divergence. It was
 contention - that run shared the machine with six others.
+
+**Surveyed without rip-up, 806 to 827 of `gcd`'s 1103 connections route, and
+about half the failures are the same in every order.** `OHMC_RIPS=0` gives each
+connection one full-ladder attempt and never evicts anything, which avoids the
+cascade and loses a single connection on `tick` and on `count`:
+
+| tie order | routed | unroutable |
+|---|---|---|
+| default | 807 | 296 |
+| seed 1 | 827 | 276 |
+| seed 2 | 806 | 297 |
+
+A spread of 21 across orders, where the first-failure metric spread by 480.
+`OHMC_SURVEY_OUT` writes out which connections failed, and the three lists
+were compared under a rule fixed before any of them existed - the share of an
+average list that every order loses: at least 0.60 is a stable hard core, at
+most 0.30 is order-dependent contention, anything between is mixed.
+
+142 connections fail in all three orders, 437 in at least one: a share of
+**0.49, mixed**. The core is concentrated where the hot-slab measurement
+pointed. Six nets hold 44 of the 142:
+
+| net | driver | readers | core failures |
+|---|---|---|---|
+| 167 | `Nor([43])` | 41 | 14 |
+| 168 | `Nor([34])` | 18 | 8 |
+| 43 | `DffQ(41)` | 42 | 7 |
+| 201 | `Nor([39])` | 9 | 6 |
+| 44 | `Nor([36])` | 9 | 5 |
+| 36 | `DffQ(34)` | 11 | 4 |
+
+That is what splitting a wide net addresses - cloning for the NOR drivers,
+buffer trees for the flip-flop outputs - and both are being surveyed the same
+way. The other half of the failures changes with the order connections are
+tried in, which is contention between nets, and only a router that stops
+depending on that order removes it.
 
 That also says where the ceiling comes from. Each connection can be helped
 by taking room from its neighbours, right up until the neighbours have
