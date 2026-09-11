@@ -45,6 +45,15 @@ const GATE_Z: i32 = 0;
 /// than the extra room gives back. On `gcd`, 10 routes 181 connections against
 /// 715 at 6.
 const GATE_GAP: i32 = 6;
+
+/// `GATE_GAP`, or `OHMC_GATE_GAP` if set.
+///
+/// The sweep that settled on 6 measured where the first unrecoverable
+/// connection fell, which varies by hundreds across equally valid tie orders;
+/// the override exists so it can be re-measured by survey.
+fn gate_gap() -> i32 {
+    std::env::var("OHMC_GATE_GAP").ok().and_then(|v| v.parse().ok()).unwrap_or(GATE_GAP)
+}
 /// Length of the private approach lane in front of each gate input.
 const STUB_LEN: i32 = 4;
 /// Length of the output spine trailing each driver. A high-fanout gate would
@@ -796,7 +805,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             for g in row {
                 let at = wish(g, &at_x).map_or(x, |w| (w as i32).max(x)).max(0);
                 at_x.insert(g, at);
-                x = at + cell_width(g) + GATE_GAP;
+                x = at + cell_width(g) + gate_gap();
             }
         }
     }
@@ -812,7 +821,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             let at = at_x.get(&g).copied().unwrap_or(0).max(x);
             let k = net.operands(g).len().max(1);
             let cell = stamp_nor(&mut grid, (at, -l * LEVEL_H, GATE_Z), k)?;
-            x = at + cell.width + GATE_GAP;
+            x = at + cell.width + gate_gap();
             widest = widest.max(x);
             placed.insert(g, Placed { cell });
         }
@@ -1374,7 +1383,14 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             // Inputs of one gate are two columns apart, so their chains are
             // separated in Z instead, keeping them clear of each other's keepout.
             let rx = chain_x[(stage - 1) as usize];
-            let ry = top - stage * (drop / stages);
+            // Multiply before dividing. `stage * (drop / stages)` truncates the
+            // per-stage drop, so every relay lands a fraction of a block high
+            // and the whole shortfall is left for the final hop - which has no
+            // relay of its own to absorb it. Deep `gcd` connections put 22 to
+            // 25 blocks of fall on that last hop, against 11 on every other,
+            // and it could only be a staircase with no room for a repeater.
+            // `staged_route` already interpolated this way.
+            let ry = top - drop * stage / stages;
             // Z band by the level the relay lands on.
             //
             // A chain descends through levels, so its stages land on different
