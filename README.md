@@ -548,6 +548,29 @@ because every connection it evicts cannot find a new path either, fails, and
 evicts its own neighbours in turn. Rip-up helps only when the search is strong
 enough to re-route whatever it displaces.
 
+**Routing is deterministic, so comparisons across tie orders are valid.** Two
+runs of the same survey on the same input must print the same progress at every
+checkpoint. A second run of an identical configuration, hours after the first
+and under different machine load, matched all eight checkpoints exactly:
+
+| taken | routed | unroutable | still queued |
+|---|---|---|---|
+| 50 | 48 | 0 | 1054 |
+| 100 | 79 | 2 | 1021 |
+| 150 | 105 | 4 | 993 |
+| 200 | 130 | 5 | 967 |
+| 250 | 165 | 7 | 930 |
+| 300 | 197 | 8 | 897 |
+| 350 | 203 | 8 | 891 |
+| 400 | 173 | 9 | 920 |
+
+The last two rows are the demanding part. Between them rip-up evicts thirty
+finished connections, which is where any hash-order or timing dependence would
+show first, and the replay reproduces the drop to the connection. This was worth
+checking rather than assuming: the original run had used 70 CPU-minutes to reach
+a point this one reached in 21, a gap large enough to suggest divergence. It was
+contention - that run shared the machine with six others.
+
 That also says where the ceiling comes from. Each connection can be helped
 by taking room from its neighbours, right up until the neighbours have
 none left to give, and no constant fixes that. What is needed is
