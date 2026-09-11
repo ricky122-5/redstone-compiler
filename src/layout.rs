@@ -226,7 +226,7 @@ fn nearest_source(from: &[Pos], p: Pos) -> Pos {
 /// A relay is what makes a long descent possible. It restores the signal to
 /// full strength, so each stage gets its own budget, and it breaks the drop
 /// into pieces small enough that a monotonic path exists.
-fn stamp_relay(grid: &mut Grid, pos: Pos) -> Result<(Pos, Pos), String> {
+fn stamp_relay(grid: &mut Grid, router: &mut Router, pos: Pos) -> Result<(Pos, Pos), String> {
     let inp = (pos.0, pos.1, pos.2 - 1);
     let out = (pos.0, pos.1, pos.2 + 1);
     for p in [inp, pos, out] {
@@ -236,14 +236,19 @@ fn stamp_relay(grid: &mut Grid, pos: Pos) -> Result<(Pos, Pos), String> {
         let sub = (p.0, p.1 - 1, p.2);
         if grid.is_free(sub) {
             grid.set(sub, Block::Solid(Material::Clock))?;
+            router.note_grid(sub);
         } else if !grid.get(sub).is_opaque() {
             return Err(format!("relay at {pos:?} has no solid footing at {sub:?}"));
         }
     }
-    grid.set(inp, Block::Dust { power: 0 })?;
     // Reads from the north, drives south: stages always run in +Z.
-    grid.set(pos, Block::Repeater { facing: Dir::North, delay: 1, powered: false })?;
-    grid.set(out, Block::Dust { power: 0 })?;
+    let repeater = Block::Repeater { facing: Dir::North, delay: 1, powered: false };
+    for (p, b) in [(inp, Block::Dust { power: 0 }), (pos, repeater), (out, Block::Dust { power: 0 })] {
+        if grid.is_free(p) {
+            router.note_grid(p);
+        }
+        grid.set(p, b)?;
+    }
     Ok((inp, out))
 }
 
@@ -444,7 +449,7 @@ fn staged_route(
             eprintln!("  stage {stage}: nominal ({rx},{ry},{rz}) site {site:?}  hop dh={dh} dv={dv}{}",
                 if dv > dh { "  << STEEPER THAN 1:1" } else { "" });
         }
-        let (rin, rout) = stamp_relay(grid, site)?;
+        let (rin, rout) = stamp_relay(grid, router, site)?;
         router.claim(rin, net_id);
         router.claim(rout, net_id);
         router.block(site);
@@ -1259,6 +1264,10 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             grid = grid_snapshot.clone();
             router = router_snapshot.clone();
         }
+        // All or nothing: a connection that fails part-way is taken back
+        // whole, relays and all, and one that succeeds is filed under its net
+        // so ripping that net removes exactly what it built.
+        router.begin_txn();
         if survey {
             popped += 1;
             if popped % 50 == 0 {
@@ -1537,7 +1546,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                     hop_is_buildable(near, site)
                 );
             }
-            let (rin, rout) = stamp_relay(&mut grid, site)?;
+            let (rin, rout) = stamp_relay(&mut grid, &mut router, site)?;
             router.claim(rin, src);
             router.claim(rout, src);
             router.block(site);
@@ -1556,6 +1565,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         // stage routes to it. Rip-up covered only the last hop, so those
         // failures were fatal even though the space was recoverable.
         if let Some(e) = stage_err {
+            router.abort_txn(&mut grid);
             if isolate {
                 iso_fail.push((g, j, src, e));
                 continue;
@@ -1654,10 +1664,12 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                     }
                     continue;
                 }
+                router.commit_txn(src);
                 routed += 1;
                 done.push((g, j, src));
             }
             Err(e) => {
+                router.abort_txn(&mut grid);
                 if isolate {
                     iso_fail.push((g, j, src, e));
                     continue;

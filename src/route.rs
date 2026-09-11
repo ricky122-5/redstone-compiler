@@ -37,6 +37,20 @@ pub type NetId = u32;
 /// short straight into that gate's input.
 pub const PREPLACED: NetId = u32::MAX;
 
+/// One reversible change a connection made to the grid or the router's books.
+///
+/// Only genuine changes are recorded - a block placed in a free cell, an owner
+/// that differs from the one it replaced, a set entry that was not already
+/// there - so undoing never removes something the connection did not create.
+#[derive(Clone, Copy, Debug)]
+enum Undo {
+    Grid(Pos),
+    Owner(Pos, Option<NetId>),
+    Claimed(Pos),
+    Blocked(Pos),
+    Unblocked(Pos),
+}
+
 #[derive(Clone)]
 pub struct Router {
     /// How contested each cell has proved across routing attempts.
@@ -84,6 +98,11 @@ pub struct Router {
     /// Cells temporarily barred while retrying a single route. Cleared between
     /// routes; this is what lets rip-up-and-retry escape a bad path shape.
     scratch: HashSet<Pos>,
+    /// Changes made since [`Self::begin_txn`], if a connection is open.
+    journal: Option<Vec<Undo>>,
+    /// Every committed connection's changes, by net, so [`Self::rip`] can take
+    /// back exactly what that net built.
+    net_undo: HashMap<NetId, Vec<Undo>>,
     /// Search limits, to keep a hopeless route from running away.
     pub max_expansions: usize,
 }
@@ -161,6 +180,8 @@ impl Router {
             scratch: HashSet::new(),
             history: HashMap::new(),
             commit_log: Vec::new(),
+            journal: None,
+            net_undo: HashMap::new(),
             max_expansions: 250_000,
         };
         for (&p, &b) in grid.iter() {
@@ -343,22 +364,88 @@ impl Router {
 
     /// Remove everything `net` routed, freeing the space for someone else.
     ///
-    /// Endpoints stay: gate outputs, feed stubs and relay ends are structure,
-    /// not routing, and the connection will want them again when it is redone.
+    /// Endpoints stay: gate outputs and feed stubs are structure, not routing,
+    /// and the connection will want them again when it is redone. Relays are
+    /// routing - the redone chain stamps its own wherever it lands.
     /// Returns the cells released.
+    ///
+    /// This used to remove the net's dust and nothing else. A committed wire
+    /// also lays substrate under every cell and blocks the clearance above it,
+    /// and a staged connection stamps relays with their own footing - all of
+    /// which stayed behind. So every rip left a ghost of the route it removed:
+    /// a solid line one level down and a blocked line one level up, around a
+    /// channel nothing could enter, plus orphaned relays. On `gcd` under level
+    /// cap 30 a feed stub ended with 0 of 12 approaches open after six rounds
+    /// of ripping its neighbours. Now the net's recorded changes are undone.
     pub fn rip(&mut self, grid: &mut Grid, net: NetId) -> Vec<Pos> {
-        let doomed: Vec<Pos> = self
-            .owner
-            .iter()
-            .filter(|(p, &o)| o == net && !self.claimed.contains(p))
-            .map(|(&p, _)| p)
-            .collect();
-        for &p in &doomed {
-            self.owner.remove(&p);
-            grid.clear(p);
-            self.blocked.remove(&p);
+        let log = self.net_undo.remove(&net).unwrap_or_default();
+        self.undo(grid, log)
+    }
+
+    /// Open a connection: changes from here on are recorded so the whole
+    /// connection can be committed or taken back as one.
+    ///
+    /// A staged connection commits each relay hop as it goes, so one that fails
+    /// at stage 5 has already built stages 1 to 4 - and nothing removed them.
+    /// A survey loses a hundred or more connections this way, each leaving a
+    /// dead partial chain for every later connection to route around.
+    pub fn begin_txn(&mut self) {
+        self.journal = Some(Vec::new());
+    }
+
+    /// Keep the open connection, filed under `net` for a later [`Self::rip`].
+    pub fn commit_txn(&mut self, net: NetId) {
+        if let Some(log) = self.journal.take() {
+            self.net_undo.entry(net).or_default().extend(log);
         }
-        doomed
+    }
+
+    /// Take back everything the open connection changed.
+    pub fn abort_txn(&mut self, grid: &mut Grid) -> usize {
+        match self.journal.take() {
+            Some(log) => self.undo(grid, log).len(),
+            None => 0,
+        }
+    }
+
+    /// Record a block the caller placed in a free cell (relay stamping writes
+    /// the grid directly).
+    pub fn note_grid(&mut self, p: Pos) {
+        self.note(Undo::Grid(p));
+    }
+
+    fn note(&mut self, u: Undo) {
+        if let Some(j) = self.journal.as_mut() {
+            j.push(u);
+        }
+    }
+
+    fn undo(&mut self, grid: &mut Grid, log: Vec<Undo>) -> Vec<Pos> {
+        let mut freed = Vec::new();
+        for u in log.into_iter().rev() {
+            match u {
+                Undo::Grid(p) => {
+                    grid.clear(p);
+                    freed.push(p);
+                }
+                Undo::Owner(p, Some(o)) => {
+                    self.owner.insert(p, o);
+                }
+                Undo::Owner(p, None) => {
+                    self.owner.remove(&p);
+                }
+                Undo::Claimed(p) => {
+                    self.claimed.remove(&p);
+                }
+                Undo::Blocked(p) => {
+                    self.blocked.remove(&p);
+                }
+                Undo::Unblocked(p) => {
+                    self.blocked.insert(p);
+                }
+            }
+        }
+        freed
     }
 
     /// Nets with wire within `r` of `p`, nearest first. These are the ones
@@ -424,15 +511,24 @@ impl Router {
     }
 
     pub fn block(&mut self, p: Pos) {
-        self.blocked.insert(p);
+        if self.blocked.insert(p) {
+            self.note(Undo::Blocked(p));
+        }
     }
 
     /// Declare that the dust at `p` belongs to `net` (e.g. a cell's output or
     /// an input feed), so routes for that net may attach to it.
     pub fn claim(&mut self, p: Pos, net: NetId) {
-        self.owner.insert(p, net);
-        self.claimed.insert(p);
-        self.blocked.remove(&p);
+        let prev = self.owner.insert(p, net);
+        if prev != Some(net) {
+            self.note(Undo::Owner(p, prev));
+        }
+        if self.claimed.insert(p) {
+            self.note(Undo::Claimed(p));
+        }
+        if self.blocked.remove(&p) {
+            self.note(Undo::Unblocked(p));
+        }
     }
 
     fn owned_by_other(&self, p: Pos, net: NetId) -> bool {
@@ -829,6 +925,7 @@ impl Router {
             // route's substrate) rather than trying to replace it.
             if grid.is_free(down(p)) {
                 grid.set(down(p), Block::Solid(material))?;
+                self.note(Undo::Grid(down(p)));
             } else if !grid.get(down(p)).is_opaque() {
                 // Dust needs a full block under it. The search rejects cells
                 // whose support is neither free nor opaque, but the *target* is
@@ -843,6 +940,9 @@ impl Router {
                     grid.get(down(p))
                 ));
             }
+            // The target is an existing feed stub or relay end; only a cell
+            // this commit fills from empty is its to take back.
+            let fresh = grid.is_free(p);
             if sites.contains(&i) {
                 let dir = if p.0 > prev.0 {
                     Dir::West
@@ -857,8 +957,16 @@ impl Router {
             } else {
                 grid.set(p, Block::Dust { power: 0 })?;
             }
-            self.owner.insert(p, net);
-            self.blocked.insert(up(p));
+            if fresh {
+                self.note(Undo::Grid(p));
+            }
+            let prev_owner = self.owner.insert(p, net);
+            if prev_owner != Some(net) {
+                self.note(Undo::Owner(p, prev_owner));
+            }
+            if self.blocked.insert(up(p)) {
+                self.note(Undo::Blocked(up(p)));
+            }
             self.commit_log.push(p);
         }
         Ok(())
