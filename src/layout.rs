@@ -195,6 +195,23 @@ fn hop_is_buildable(a: Pos, b: Pos) -> bool {
     dh >= dv + 1 + dv / (crate::tech::MAX_RUN - 1)
 }
 
+/// The source a hop to `p` will actually leave from: the nearest one.
+///
+/// A stage's sources are every cell of a spine, and the router takes whichever
+/// is cheapest - the closest. Grading the hop against `sources[0]`, the spine's
+/// far end, is grading a route that will not be built. `gcd`'s net 43 has a
+/// 68-cell spine, and four of its connections put their first relay 35-51
+/// blocks from `sources[0]` but 4-6 from the spine cell beside it, with 11 to
+/// fall: a hop that passed the check and could only be a staircase. Alone on an
+/// empty grid the retries found a way round it; with contention history
+/// seeded, two of the four could not.
+fn nearest_source(from: &[Pos], p: Pos) -> Pos {
+    *from
+        .iter()
+        .min_by_key(|s| (s.0 - p.0).abs() + (s.1 - p.1).abs() + (s.2 - p.2).abs())
+        .unwrap_or(&from[0])
+}
+
 /// Stamp a relay: a repeater with dust either side.
 ///
 /// A relay is what makes a long descent possible. It restores the signal to
@@ -335,7 +352,7 @@ fn staged_route(
         // are left exactly where they were; only the one that cannot be built
         // moves.
         {
-            let prev = from[0];
+            let prev = nearest_source(&from, (rx, ry, rz));
             let dv = (ry - prev.1).abs();
             let dh = (rx - prev.0).abs() + (rz - prev.2).abs();
             // Enough spare horizontal for a flat cell often enough to hold a
@@ -386,7 +403,7 @@ fn staged_route(
             // run the correction just bought, and put us right back at an
             // unbuildable grade. Grade is a hard physical constraint, not a
             // preference, so it filters candidates rather than ranking them.
-            let prev = from[0];
+            let prev = nearest_source(&from, c);
             let grade_ok = hop_is_buildable;
             // The last relay is also checked against the target it feeds: the
             // final hop has no relay of its own to move, so if it is too steep
@@ -1039,6 +1056,28 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         }
         None => work.sort_by_key(|&(g, j, _, dist)| (std::cmp::Reverse(dist), g, j)),
     }
+    // `OHMC_ONLY=path` keeps just the connections listed in a survey's
+    // `OHMC_SURVEY_OUT` file (`net gate input` per line), in their usual order.
+    //
+    // With `OHMC_ISOLATE` it measures where the connections that *failed* a pass
+    // want to be. Those cells are held by some other net's wire, so charging them
+    // before the next pass is what pushes the occupants aside - the history
+    // update of negotiated routing, taken one whole pass at a time.
+    if let Ok(path) = std::env::var("OHMC_ONLY") {
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+        let keep: HashSet<(Sig, Sig, usize)> = text
+            .lines()
+            .filter_map(|l| {
+                let f: Vec<&str> = l.split_whitespace().collect();
+                match f[..] {
+                    [s, g, j] => Some((s.parse().ok()?, g.parse().ok()?, j.parse().ok()?)),
+                    _ => None,
+                }
+            })
+            .collect();
+        work.retain(|&(g, j, s, _)| keep.contains(&(s, g, j)));
+        eprintln!("kept {} of {} listed connections from {path}", work.len(), keep.len());
+    }
 
     let total_conns = work.len();
     let mut routed = 0usize;
@@ -1403,7 +1442,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             // ran 13 blocks with no flat run to hold a repeater", which is a
             // pure staircase with nowhere to refresh the signal.
             {
-                let prev = from[0];
+                let prev = nearest_source(&from, (rx, ry, rz));
                 let dv = (ry - prev.1).abs();
                 let dh = (rx - prev.0).abs() + (rz - prev.2).abs();
                 // Enough spare horizontal for a flat cell often enough to hold a
@@ -1446,7 +1485,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                 // just bought. Grade is physics, not preference, so it filters
                 // rather than ranks.
                 .filter(|&c| {
-                    let prev = from[0];
+                    let prev = nearest_source(&from, c);
                     let grade_ok = hop_is_buildable;
                     // Both directions, not just the one behind.
                     //
@@ -1467,6 +1506,21 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                         "no clear relay site near ({rx}, {ry}, {rz}) for net {src}                          into gate {g} input {j}"
                     )
                 })?;
+            if std::env::var("OHMC_TRACE").is_ok() {
+                let near = *from
+                    .iter()
+                    .min_by_key(|s| (s.0 - site.0).abs() + (s.1 - site.1).abs() + (s.2 - site.2).abs())
+                    .unwrap_or(&from[0]);
+                let hop = |a: Pos| ((a.1 - site.1).abs(), (a.0 - site.0).abs() + (a.2 - site.2).abs());
+                eprintln!(
+                    "  stage {stage}: site {site:?}; from[0] {:?} dv,dh {:?} ok {}; nearest {near:?} dv,dh {:?} ok {}",
+                    from[0],
+                    hop(from[0]),
+                    hop_is_buildable(from[0], site),
+                    hop(near),
+                    hop_is_buildable(near, site)
+                );
+            }
             let (rin, rout) = stamp_relay(&mut grid, site)?;
             router.claim(rin, src);
             router.claim(rout, src);
@@ -1749,7 +1803,12 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             eprintln!("  half of the slab's footprint belongs to the top {half} nets");
         }
         if let Ok(path) = std::env::var("OHMC_WRITE_CONGESTION") {
-            let mut cells: Vec<(&Pos, &i32)> = demand.iter().filter(|(_, &n)| n > 1).collect();
+            // Cells wanted by fewer than `OHMC_CONGESTION_MIN` connections are
+            // left out (default 2: one connection alone contests nothing). A map
+            // of failed connections wants 1, since every cell they need matters.
+            let min: i32 =
+                std::env::var("OHMC_CONGESTION_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(2);
+            let mut cells: Vec<(&Pos, &i32)> = demand.iter().filter(|(_, &n)| n >= min).collect();
             cells.sort();
             let text: String = cells.iter().map(|(p, n)| format!("{} {} {} {}\n", p.0, p.1, p.2, n)).collect();
             std::fs::write(&path, text).map_err(|e| format!("{path}: {e}"))?;
