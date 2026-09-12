@@ -672,8 +672,23 @@ larger, and leave more of them unrouted. The copies stop paying for the space
 they take.
 
 The optimum is also placement-dependent, which is worth knowing before treating
-either knob as settled: on cap 16, threshold 12 beats threshold 6 at the same
-checkpoints where cap 24 shows the reverse.
+either knob as settled. Surveyed across both:
+
+| | unsplit | threshold 12 | threshold 6 |
+|---|---|---|---|
+| cap 16 | 73 | **56** | 62 |
+| cap 24 | 68 | 59 | **47** |
+
+The tighter placement wants the looser split and the looser placement wants the
+tighter one, so neither knob can be tuned alone. Splitting is worth more on cap
+16 (17 connections) than on cap 24 (9), but cap 24 at threshold 6 still wins
+outright.
+
+Cloning and buffering rewrite the gate graph, so the transformed netlist is
+checked against the original in `examples/clone_check.rs` rather than trusted:
+at threshold 6 - fourteen copies, 724 gates to 752 - the two agree cycle for
+cycle on all thirteen vectors, including `gcd(48, 18) = 6` and a 5000-cycle
+case.
 
 That also says where the ceiling comes from. Each connection can be helped
 by taking room from its neighbours, right up until the neighbours have
@@ -845,8 +860,11 @@ on its *twelfth* round, so that run is cut off rather than converged.
 Which means barren rounds prove nothing here: cap 16 had three in a row and then
 improved anyway. Under the strict rule a round that keeps nothing really is the
 end, because the grid it hands on is the same grid; a neutral trade changes the
-grid, so the next round is a different question. Both configurations are being
-re-run to thirty rounds to find where this actually stops.
+grid, so the next round is a different question. Re-run to thirty rounds, all of them stall in the low thirties: cap 16 at
+budget 10 held 34 through five straight barren rounds, cap 24 at budget 30 held
+34 through three, and cap 16 at budget 30 sat at 32 through four. None of them
+reached the round limit with anything left to find, so 32 to 34 is where
+plateau repair stops on the unsplit netlist.
 
 The budget matters, but only late. Thirty neutral trades a round tracks ten for
 six rounds and then pulls ahead, finishing at **32 - 1071 of 1103 routed** where
