@@ -728,7 +728,14 @@ connection, which settles what the 34 failures that ended at exactly the cap
 were - not slow, unreachable. Re-tested against a grid repair has filled, where
 18 of the 39 survivors give up at the cap, it matches again at every point
 measured: 68 unroutable after the survey pass, then 54, 48 and 43 through three
-repair rounds, the same four numbers as the default. Both variants led at every mid-run checkpoint and
+repair rounds, the same four numbers as the default.
+
+Nor is the *box*. A bigger budget only searches longer inside the same bounds,
+so `OHMC_MARGIN` widens them - and tripling the margin gives 67 against 68,
+matching at 300, 600 and 900 connections taken on the way. That is the more
+informative half: 26 of those 68 failures report no route at all, and they are
+not recovered by three times the room to detour in. The search is not being
+clipped by its bounds; the corridor is genuinely full. Both variants led at every mid-run checkpoint and
 converged by the end; on this design a lead at 300, 600 or 900 connections taken
 has reversed four times, and only the final count means anything.
 
