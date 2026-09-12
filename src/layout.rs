@@ -1428,11 +1428,16 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                     && !unroutable.is_empty()
                 {
                     if repair_stall_k && repair_round > 0 && repair_improved == 0 {
+                        let was = stall_extra;
                         stall_extra = (stall_extra + 1).min(repair_kmax.saturating_sub(repair_k));
-                        eprintln!(
-                            "repair: round {repair_round} improved nothing, ripping {} nets from now on",
-                            repair_k + stall_extra
-                        );
+                        // Only announce a widening that actually happened: once
+                        // the cap is reached every barren round would repeat it.
+                        if stall_extra != was {
+                            eprintln!(
+                                "repair: round {repair_round} improved nothing, ripping {} nets from now on",
+                                repair_k + stall_extra
+                            );
+                        }
                     }
                     repair_round += 1;
                     repair_kept = 0;
