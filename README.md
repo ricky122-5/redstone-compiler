@@ -684,6 +684,17 @@ tighter one, so neither knob can be tuned alone. Splitting is worth more on cap
 16 (17 connections) than on cap 24 (9), but cap 24 at threshold 6 still wins
 outright.
 
+The two transforms are not separable, either. Buffering alone is worth nothing
+(69 against the baseline's 68), but dropping it from the threshold-6 netlist
+costs 10 - 57 unroutable instead of 47. Splitting the flip-flop outputs only
+pays once the wide NOR has been cloned, which is why the first experiments,
+which measured each alone on the uncapped array, found nothing worth keeping.
+
+The threshold curve is not smooth and should not be read as one: 6 gives 47,
+but 4, 5 and 12 give 57, 63 and 59 - scrambled within six of each other. Only
+threshold 6's twelve-connection lead is a signal; differences that size between
+splitting configurations are noise.
+
 Cloning and buffering rewrite the gate graph, so the transformed netlist is
 checked against the original in `examples/clone_check.rs` rather than trusted:
 at threshold 6 - fourteen copies, 724 gates to 752 - the two agree cycle for
