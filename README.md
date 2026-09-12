@@ -772,6 +772,17 @@ because ripping three nets displaces enough routed connections that no trial
 comes out ahead and the round keeps nothing. K=2 lost to K=1 on cap 30 the
 same way. What limits repair is not the size of the disturbance it may make.
 
+**Nor is it the shape of the chain.** A connection's stage count comes from its
+geometry and never varies, so every retry rebuilds a chain of the same shape;
+after plateau repair most of what is left fails *inside* the chain rather than
+on the final approach, which suggests chains that cannot be shaped where they
+are. `OHMC_REPAIR_RESTAGE` gives a retried connection one more stage each time.
+Measured, it is behind on both placements: on cap 24 it led by one after round
+one and was eight behind by round five, and on cap 16 it led by four after round
+two and was five behind by round six. Both were stopped there rather than run
+out. An extra stage is more relays competing for the same space, which costs
+more than the finer spacing buys.
+
 What is left is 39 connections: 18 give up at the search cap, 11 find no route
 at all, 7 cannot hold a repeater, 3 collide with themselves. `gcd` still does
 not place, and nothing measured so far closes a gap this size.
