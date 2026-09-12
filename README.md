@@ -892,6 +892,34 @@ Both match the golden model cycle for cycle. Simulation agreement is not the
 same claim: these are 54,414 and 85,992 setblock commands run one at a time in
 an unmodified server.
 
+**Splitting and repair together take `gcd` to eleven connections short.** Each
+is worth a lot on its own and they compose: cloning at threshold 6 turns the
+survey pass from 68 unroutable into 47, and plateau repair then takes that to
+**11 - 1120 of 1131 routed**, against 32 for the same repair on the unsplit
+netlist. It converges hard: 47, 37, 28, 19, 18, 16 over the first six rounds,
+11 by round twelve, and then seventeen rounds finding nothing at all.
+
+| cap 24 | survey pass | after plateau repair |
+|---|---|---|
+| unsplit | 68 | 32 |
+| clone 6 + buffer 12 | 47 | **11** |
+
+The eleven that remain have no shape to attack. They are eleven connections on
+eleven *different* nets - not one wide net's fan-out, which is what every
+earlier failure set was - and they fail four different ways: four find no route
+at all, three cannot hold a repeater, three exhaust the search, one collides
+with itself. The hot spot that dominated this design from the beginning is gone;
+what is left is eleven separate unlucky corners.
+
+Two more levers were measured against that eleven and neither is one. **Tie
+order**, which spread the unsplit result across 39 to 64 and was the obvious
+lottery ticket, is not a lottery on the split netlist: orders 1 and 2 give 68
+and 65 on the survey pass where the default gives 47, so the default order is
+substantially better rather than merely luckier. And the **level cap has to be
+re-tuned per netlist but does not move further**: under threshold-6 cloning,
+caps 20 and 28 sit at 34 and 35 unroutable by 600 connections taken where cap 24
+sits at 16.
+
 **Not done — the honest gap:**
 
 1. **The 2-bit adder is 14/16 in the real game, and the harness is the weak
