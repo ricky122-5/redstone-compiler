@@ -788,8 +788,11 @@ grid, so the next round is a different question. Both configurations are being
 re-run to thirty rounds to find where this actually stops.
 
 The budget matters, but only late. Thirty neutral trades a round tracks ten for
-six rounds and then pulls ahead - 34 against 36 on cap 24 - so the reshuffling
-that pays is the reshuffling done after the easy trades are gone.
+six rounds and then pulls ahead, finishing at **32 - 1071 of 1103 routed** where
+ten finished at 36: the reshuffling that pays is the reshuffling done after the
+easy trades are gone. That run also took two connections in its twelfth and last
+round, so like cap 16 it was cut off rather than finished. Every plateau run so
+far has ended while still improving.
 
 Two variants that sound similar do not work. Ripping more nets per trial ends
 repair *sooner* (above), and a bigger search budget changes nothing at all. The
