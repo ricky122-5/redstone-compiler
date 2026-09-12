@@ -37,6 +37,14 @@ pub type NetId = u32;
 /// short straight into that gate's input.
 pub const PREPLACED: NetId = u32::MAX;
 
+/// How much wider than default to make each search box. Read once.
+fn margin_factor() -> i32 {
+    static F: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    *F.get_or_init(|| {
+        std::env::var("OHMC_MARGIN").ok().and_then(|v| v.parse().ok()).unwrap_or(1).max(1)
+    })
+}
+
 /// One reversible change a connection made to the grid or the router's books.
 ///
 /// Only genuine changes are recorded - a block placed in a free cell, an owner
@@ -1068,7 +1076,16 @@ impl Router {
             // only way down is a switchback, which lands a wire two levels above
             // its own substrate and breaks the slope (see `first_conflict`).
             let drop = (from.1 - to.1).abs();
-            let margin = 10 + drop + attempt as i32 * 5;
+            // `OHMC_MARGIN` widens the search box by this factor.
+            //
+            // Raising the expansion cap changed nothing, which was read as the
+            // targets being unreachable - but a bigger budget only searches
+            // longer *inside the same box*. After plateau repair on level cap
+            // 24, 15 of the 32 connections still unrouted report no route at
+            // all while their targets keep two to five open approaches. That is
+            // what a box too narrow to hold the detour looks like, not a sealed
+            // target.
+            let margin = (10 + drop + attempt as i32 * 5) * margin_factor();
             let local = (
                 (
                     (from.0.min(to.0) - margin).max(bounds.0 .0),
