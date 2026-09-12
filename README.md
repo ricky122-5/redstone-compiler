@@ -769,6 +769,25 @@ What is left is 39 connections: 18 give up at the search cap, 11 find no route
 at all, 7 cannot hold a repeater, 3 collide with themselves. `gcd` still does
 not place, and nothing measured so far closes a gap this size.
 
+**Accepting a trade that changes nothing is what gets past that wall.** Keeping
+only strict improvements is exactly what makes repair converge: at 39 every
+single-net trade is neutral or worse, so nothing is ever kept again. But a
+neutral trade still *moves wire*, and the trial after it sees a different grid.
+`OHMC_REPAIR_PLATEAU=n` lets a round accept up to `n` trials that leave the
+count unchanged, at most one per target, the budget resetting each round.
+
+On cap 24 that reaches **36 - 1067 of 1103 routed** - over twelve rounds whose
+last three are barren, so it too is converged, three connections past where the
+strict rule stopped. Cap 16 shows the same effect from its own converged 43,
+and is still running. The budget hardly matters: thirty neutral trades a round
+tracks ten round for round, which says the point is not how much reshuffling is
+allowed but that any is.
+
+Two variants that sound similar do not work. Ripping more nets per trial ends
+repair *sooner* (above), and a bigger search budget changes nothing at all. The
+difference is that those enlarge the disturbance a single trial may make, while
+a neutral trade changes which grid the *next* trial starts from.
+
 **The two sequential designs still work in the real game after all of this.**
 Every change above moves relays and rewrites geometry, so `tick` and `count`
 were re-verified end to end - placed by `.mcfunction`, cleared, clocked, and
