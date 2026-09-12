@@ -753,6 +753,15 @@ hopes, never checking whether the evicted nets found room, which is how it
 cascades. Undoing a losing trial is only sound because routing is
 all-or-nothing and rip-up returns exactly what a net built.
 
+**Ripping more per trial makes repair stop sooner, not dig deeper.** The
+obvious reading of the decay - the single-neighbour trades run out - says a
+connection needing two nets moved is never offered that trade, so
+`OHMC_REPAIR_ESCALATE` raises the rip by one net each round. Measured, it is
+worse: 49 unroutable against 39, and it ends in round 3 rather than round 6,
+because ripping three nets displaces enough routed connections that no trial
+comes out ahead and the round keeps nothing. K=2 lost to K=1 on cap 30 the
+same way. What limits repair is not the size of the disturbance it may make.
+
 What is left is 39 connections: 18 give up at the search cap, 11 find no route
 at all, 7 cannot hold a repeater, 3 collide with themselves. `gcd` still does
 not place, and nothing measured so far closes a gap this size.
