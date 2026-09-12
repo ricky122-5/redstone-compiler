@@ -729,6 +729,46 @@ were - not slow, unreachable. Both variants led at every mid-run checkpoint and
 converged by the end; on this design a lead at 300, 600 or 900 connections taken
 has reversed four times, and only the final count means anything.
 
+**Rip-up that can be taken back recovers two failures in five.** `OHMC_REPAIR=n`
+revisits the survey's unroutable connections once the queue empties. Each trial
+snapshots the grid and router, rips the nets crowding the connection, routes it,
+re-routes everything the rip displaced, and keeps the result *only* if fewer
+connections are left unroutable. On level cap 24:
+
+| after | unroutable | kept that round |
+|---|---|---|
+| survey | 68 | - |
+| round 1 | 54 | 14 |
+| round 2 | 48 | 6 |
+| round 3 | 44 | 4 |
+| round 4 | 43 | 1 |
+| round 5 | **39** | 4 |
+
+1064 of 1103 routed, the best this design has reached. Cap 16 converges the
+same way, 73 to 43, so repair narrows the gap between placements as well: a
+worse start recovers more. Ordinary rip-up cannot do this - it evicts and
+hopes, never checking whether the evicted nets found room, which is how it
+cascades. Undoing a losing trial is only sound because routing is
+all-or-nothing and rip-up returns exactly what a net built.
+
+What is left is 39 connections: 18 give up at the search cap, 11 find no route
+at all, 7 cannot hold a repeater, 3 collide with themselves. `gcd` still does
+not place, and nothing measured so far closes a gap this size.
+
+**The two sequential designs still work in the real game after all of this.**
+Every change above moves relays and rewrites geometry, so `tick` and `count`
+were re-verified end to end - placed by `.mcfunction`, cleared, clocked, and
+read off the lamps:
+
+| design | in Minecraft |
+|---|---|
+| `tick` | go=0 → 0; go=1 → done at cycle 7 |
+| `count` | n=0,1,2,3 → c=0,1,2,3 at cycles 1, 7, 9, 11 |
+
+Both match the golden model cycle for cycle. Simulation agreement is not the
+same claim: these are 54,414 and 85,992 setblock commands run one at a time in
+an unmodified server.
+
 **Not done — the honest gap:**
 
 1. **The 2-bit adder is 14/16 in the real game, and the harness is the weak
