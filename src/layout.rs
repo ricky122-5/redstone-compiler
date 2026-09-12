@@ -1333,6 +1333,19 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     // acceptance per round and the round has a budget.
     let repair_plateau: usize =
         std::env::var("OHMC_REPAIR_PLATEAU").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    // `OHMC_REPAIR_RESTAGE` gives a repair target one more relay stage each
+    // time it is retried.
+    //
+    // A connection's stage count comes from its own geometry and never varies,
+    // so every retry rebuilds a chain of the same shape in the same places -
+    // the relay band rotates, but the spacing does not. That is fine while the
+    // failures are approach failures, which ripping neighbours can clear; after
+    // plateau repair on level cap 24 they are not. Of the 36 left, 14 fail
+    // between relays and 13 leaving the driver, against 9 on the final hop:
+    // chains that cannot be shaped where they are, not targets that are walled
+    // in. An extra stage is shorter hops and a different set of relay sites.
+    let repair_restage = std::env::var("OHMC_REPAIR_RESTAGE").is_ok();
+    let mut stage_bump: HashMap<(Sig, usize), i32> = HashMap::new();
     let mut plateau_left = repair_plateau;
     let mut plateau_seen: HashSet<(Sig, usize, Sig)> = HashSet::new();
     let repair_kmax: usize =
@@ -1412,6 +1425,9 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                 ripped: 0,
             };
             unroutable.retain(|&c| c != (tg, tj, ts));
+            if repair_restage {
+                *stage_bump.entry((tg, tj)).or_insert(0) += 1;
+            }
             let feed = stub_entry[&(tg, tj)];
             let near = nearest_source(&spine[&ts], feed);
             let mut victims = router.crowders(feed, 40, ts);
@@ -1514,7 +1530,8 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         // descent was using. One relay fixes it.
         let span_h = span_reach;
         let steep = if drop * STEEP_SLACK > span_h { 2 } else { 1 };
-        let stages = vstages.max(hstages).max(steep);
+        let stages =
+            vstages.max(hstages).max(steep) + stage_bump.get(&(g, j)).copied().unwrap_or(0);
         // `OHMC_TRACE=1` prints the plan for every connection. Routing failures
         // report the search's view - open approaches, expansions - which says
         // nothing about *why* the connection was shaped the way it was; the
