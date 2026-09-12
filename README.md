@@ -632,6 +632,27 @@ original, so placement, which pulls a gate toward its drivers, pulls every copy
 toward the same place; and a buffer's new wires all begin at the original
 source. The funnel moves instead of dividing.
 
+**Re-measured on a capped placement, splitting does help - a little.** Both
+supports of that verdict have since failed: the demand proxy above was never
+checked against a survey, and it was measured on the uncapped array, which is
+itself thirty-odd connections worse than a capped one. Surveyed on level cap 24,
+no repair:
+
+| netlist | routed | unroutable |
+|---|---|---|
+| baseline | 1035 / 1103 | 68 |
+| buffer trees, threshold 12 | 1046 / 1115 | 69 |
+| gate cloning, threshold 12 | 1046 / 1107 | 61 |
+| both | 1060 / 1119 | **59** |
+
+Cloning the wide NOR is worth 7, buffering the wide flip-flop outputs is worth
+nothing by itself, and together they are worth 9 - on a netlist 16 connections
+larger, so the gain is real rather than an easier problem. Worth reading the
+shape of the run too: the combined netlist sits at 7 unroutable where the
+baseline is at 24, and 21 where it is at 41, and still finishes only 9 ahead.
+Splitting buys room through the easy two thirds and hands most of it back in the
+hard tail, which is what every mid-run lead measured here has done.
+
 That also says where the ceiling comes from. Each connection can be helped
 by taking room from its neighbours, right up until the neighbours have
 none left to give, and no constant fixes that. What is needed is
