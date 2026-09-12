@@ -1348,6 +1348,17 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     let mut stage_bump: HashMap<(Sig, usize), i32> = HashMap::new();
     let mut plateau_left = repair_plateau;
     let mut plateau_seen: HashSet<(Sig, usize, Sig)> = HashSet::new();
+    // `OHMC_REPAIR_STALL_K` widens the rip only when a round finds nothing.
+    //
+    // `OHMC_REPAIR_ESCALATE` widens it every round on a schedule and measures
+    // worse, because a bigger rip disturbs more while the one-net trades are
+    // still working. This is the other trigger: hold at one net while progress
+    // continues, and reach further only once a round has come up empty. On the
+    // split netlist repair converges at 11 and then spends seventeen rounds
+    // finding nothing, which is precisely when there is nothing left to lose.
+    let repair_stall_k = std::env::var("OHMC_REPAIR_STALL_K").is_ok();
+    let mut repair_improved = 0usize;
+    let mut stall_extra = 0usize;
     let repair_kmax: usize =
         std::env::var("OHMC_REPAIR_KMAX").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
     let mut repair_round = 0u32;
@@ -1380,6 +1391,9 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                     unroutable.len(),
                     if kept { "kept" } else { "undone" }
                 );
+                if improved {
+                    repair_improved += 1;
+                }
                 if kept {
                     repair_kept += 1;
                 } else {
@@ -1401,8 +1415,16 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                     && (repair_round == 0 || repair_kept > 0)
                     && !unroutable.is_empty()
                 {
+                    if repair_stall_k && repair_round > 0 && repair_improved == 0 {
+                        stall_extra = (stall_extra + 1).min(repair_kmax.saturating_sub(repair_k));
+                        eprintln!(
+                            "repair: round {repair_round} improved nothing, ripping {} nets from now on",
+                            repair_k + stall_extra
+                        );
+                    }
                     repair_round += 1;
                     repair_kept = 0;
+                    repair_improved = 0;
                     plateau_left = repair_plateau;
                     plateau_seen.clear();
                     repair_work = unroutable.iter().rev().copied().collect();
@@ -1441,7 +1463,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             let k = if repair_escalate {
                 (repair_k + repair_round.saturating_sub(1) as usize).min(repair_kmax)
             } else {
-                repair_k
+                (repair_k + stall_extra).min(repair_kmax)
             };
             let mut ripped = 0;
             for v in victims.into_iter().take(k) {
