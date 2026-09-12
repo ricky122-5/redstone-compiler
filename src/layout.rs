@@ -205,6 +205,18 @@ fn hop_is_buildable(a: Pos, b: Pos) -> bool {
     dh >= dv + add + dv / div
 }
 
+/// How many of the nearest crowding nets a repair trial passes over. Read once.
+///
+/// Widening the search radius does nothing on its own: `crowders` returns nets
+/// nearest-first, and a trial that rips one net always takes the head of that
+/// list whatever its length. Skipping is what changes *which* net moves.
+fn repair_skip() -> usize {
+    static R: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *R.get_or_init(|| {
+        std::env::var("OHMC_REPAIR_SKIP").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+    })
+}
+
 /// The slack terms of the grade rule, `dh >= dv + add + dv / div`.
 ///
 /// `OHMC_SLACK_ADD` and `OHMC_SLACK_DIV` override them. The sweep that settled
@@ -1450,6 +1462,18 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             if repair_restage {
                 *stage_bump.entry((tg, tj)).or_insert(0) += 1;
             }
+            // `OHMC_REPAIR_RADIUS` scales how far a trial looks for nets to
+            // rip. Every "disturb more" variant so far changed how *many* nets
+            // a trial rips and all measured worse; none changed *which*. A net
+            // blocking the corridor from fifty blocks away has never been
+            // eligible, and what survives repair on the split netlist is eleven
+            // connections in eleven unrelated corners.
+            // `OHMC_REPAIR_SKIP` passes over the nearest crowding nets so a
+            // trial moves a farther one instead. Every "disturb more" variant
+            // so far changed how *many* nets a trial rips and all measured
+            // worse; none changed *which*. The nearest net is not necessarily
+            // the one in the way, and what survives repair on the split netlist
+            // is eleven connections in eleven unrelated corners.
             let feed = stub_entry[&(tg, tj)];
             let near = nearest_source(&spine[&ts], feed);
             let mut victims = router.crowders(feed, 40, ts);
@@ -1466,7 +1490,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                 (repair_k + stall_extra).min(repair_kmax)
             };
             let mut ripped = 0;
-            for v in victims.into_iter().take(k) {
+            for v in victims.into_iter().skip(repair_skip()).take(k) {
                 router.rip(&mut grid, v);
                 let (again, keep): (Vec<_>, Vec<_>) = done.iter().partition(|&&(_, _, s)| s == v);
                 done = keep;
