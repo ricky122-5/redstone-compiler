@@ -1314,6 +1314,15 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         std::env::var("OHMC_REPAIR").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     let repair_k: usize =
         std::env::var("OHMC_REPAIR_K").ok().and_then(|v| v.parse().ok()).unwrap_or(2);
+    // `OHMC_REPAIR_ESCALATE` rips one more net per round, up to
+    // `OHMC_REPAIR_KMAX`. The single-neighbour trades run out fast - on `gcd`
+    // under level cap 24 repair keeps 14 connections in round 1, then 6, 4 and
+    // 1 - and a connection that needs *two* nets moved is never offered that
+    // trade while K stays at one. Off by default: a bigger rip disturbs more
+    // routed connections, so more trials end worse and are undone.
+    let repair_escalate = std::env::var("OHMC_REPAIR_ESCALATE").is_ok();
+    let repair_kmax: usize =
+        std::env::var("OHMC_REPAIR_KMAX").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
     let mut repair_round = 0u32;
     let mut repair_kept = 0usize;
     let mut repair_work: Vec<(Sig, usize, Sig)> = Vec::new();
@@ -1389,8 +1398,13 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             }
             // Only nets with routed connections have anything to give up.
             victims.retain(|v| done.iter().any(|&(_, _, s)| s == *v));
+            let k = if repair_escalate {
+                (repair_k + repair_round.saturating_sub(1) as usize).min(repair_kmax)
+            } else {
+                repair_k
+            };
             let mut ripped = 0;
-            for v in victims.into_iter().take(repair_k) {
+            for v in victims.into_iter().take(k) {
                 router.rip(&mut grid, v);
                 let (again, keep): (Vec<_>, Vec<_>) = done.iter().partition(|&&(_, _, s)| s == v);
                 done = keep;
