@@ -776,12 +776,20 @@ neutral trade still *moves wire*, and the trial after it sees a different grid.
 `OHMC_REPAIR_PLATEAU=n` lets a round accept up to `n` trials that leave the
 count unchanged, at most one per target, the budget resetting each round.
 
-On cap 24 that reaches **36 - 1067 of 1103 routed** - over twelve rounds whose
-last three are barren, so it too is converged, three connections past where the
-strict rule stopped. Cap 16 shows the same effect from its own converged 43,
-and is still running. The budget hardly matters: thirty neutral trades a round
-tracks ten round for round, which says the point is not how much reshuffling is
-allowed but that any is.
+On cap 24 that reaches **36 - 1067 of 1103 routed**, three past where the strict
+rule stopped, over twelve rounds whose last three are barren. Cap 16, from its
+own converged 43, reaches **34 - 1069 routed** - and finds that last connection
+on its *twelfth* round, so that run is cut off rather than converged.
+
+Which means barren rounds prove nothing here: cap 16 had three in a row and then
+improved anyway. Under the strict rule a round that keeps nothing really is the
+end, because the grid it hands on is the same grid; a neutral trade changes the
+grid, so the next round is a different question. Both configurations are being
+re-run to thirty rounds to find where this actually stops.
+
+The budget matters, but only late. Thirty neutral trades a round tracks ten for
+six rounds and then pulls ahead - 34 against 36 on cap 24 - so the reshuffling
+that pays is the reshuffling done after the easy trades are gone.
 
 Two variants that sound similar do not work. Ripping more nets per trial ends
 repair *sooner* (above), and a bigger search budget changes nothing at all. The
