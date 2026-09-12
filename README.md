@@ -725,7 +725,10 @@ survey: `+1 + dv/6` gives 69 and `+2 + dv/8` gives 72, against 68 for the
 default `+1 + dv/11`. And the search budget is not the constraint: at four times
 250,000 expansions the run is identical to the default connection for
 connection, which settles what the 34 failures that ended at exactly the cap
-were - not slow, unreachable. Both variants led at every mid-run checkpoint and
+were - not slow, unreachable. Re-tested against a grid repair has filled, where
+18 of the 39 survivors give up at the cap, it matches again at every point
+measured: 68 unroutable after the survey pass, then 54, 48 and 43 through three
+repair rounds, the same four numbers as the default. Both variants led at every mid-run checkpoint and
 converged by the end; on this design a lead at 300, 600 or 900 connections taken
 has reversed four times, and only the final count means anything.
 
@@ -747,8 +750,8 @@ connections are left unroutable. On level cap 24:
 1064 of 1103 routed, the best this design has reached - and it is genuinely
 converged, not cut short: given twelve rounds instead of five it keeps the same
 29 connections and stops in round 6, which finds nothing at all. Cap 16 converges the
-same way, 73 to 43, so repair narrows the gap between placements as well: a
-worse start recovers more. Ordinary rip-up cannot do this - it evicts and
+same way, 73 to 43 and likewise stopping in round 6 of twelve, so repair
+narrows the gap between placements as well: a worse start recovers more. Ordinary rip-up cannot do this - it evicts and
 hopes, never checking whether the evicted nets found room, which is how it
 cascades. Undoing a losing trial is only sound because routing is
 all-or-nothing and rip-up returns exactly what a net built.
