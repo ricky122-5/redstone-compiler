@@ -1321,6 +1321,20 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     // trade while K stays at one. Off by default: a bigger rip disturbs more
     // routed connections, so more trials end worse and are undone.
     let repair_escalate = std::env::var("OHMC_REPAIR_ESCALATE").is_ok();
+    // `OHMC_REPAIR_PLATEAU=n` allows up to n trials per round that leave the
+    // count unchanged instead of improving it.
+    //
+    // Keeping only strict improvements is what makes repair *stop*: on `gcd`
+    // under level cap 24 it converges at 39 unroutable, and a sixth round of
+    // twelve keeps nothing at all. At that point every single-net trade is
+    // neutral or worse - but a neutral one still moves wire, and the trial
+    // after it sees a different grid. Cycling is the risk (two connections
+    // trading the same corridor forever), so a target gets at most one neutral
+    // acceptance per round and the round has a budget.
+    let repair_plateau: usize =
+        std::env::var("OHMC_REPAIR_PLATEAU").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let mut plateau_left = repair_plateau;
+    let mut plateau_seen: HashSet<(Sig, usize, Sig)> = HashSet::new();
     let repair_kmax: usize =
         std::env::var("OHMC_REPAIR_KMAX").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
     let mut repair_round = 0u32;
@@ -1334,7 +1348,15 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             }
             if let Some(t) = trial.take() {
                 let before = t.unroutable.len();
-                let kept = unroutable.len() < before;
+                let improved = unroutable.len() < before;
+                let neutral = !improved
+                    && unroutable.len() == before
+                    && plateau_left > 0
+                    && plateau_seen.insert(t.target);
+                if neutral {
+                    plateau_left -= 1;
+                }
+                let kept = improved || neutral;
                 eprintln!(
                     "repair round {repair_round}: net {} into gate {} input {}, re-routed {} ripped \
                      connection(s): unroutable {before} -> {} {}",
@@ -1368,6 +1390,8 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                 {
                     repair_round += 1;
                     repair_kept = 0;
+                    plateau_left = repair_plateau;
+                    plateau_seen.clear();
                     repair_work = unroutable.iter().rev().copied().collect();
                     eprintln!(
                         "repair round {repair_round}: {} unroutable, {routed} routed",

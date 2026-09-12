@@ -744,7 +744,9 @@ connections are left unroutable. On level cap 24:
 | round 4 | 43 | 1 |
 | round 5 | **39** | 4 |
 
-1064 of 1103 routed, the best this design has reached. Cap 16 converges the
+1064 of 1103 routed, the best this design has reached - and it is genuinely
+converged, not cut short: given twelve rounds instead of five it keeps the same
+29 connections and stops in round 6, which finds nothing at all. Cap 16 converges the
 same way, 73 to 43, so repair narrows the gap between placements as well: a
 worse start recovers more. Ordinary rip-up cannot do this - it evicts and
 hopes, never checking whether the evicted nets found room, which is how it
