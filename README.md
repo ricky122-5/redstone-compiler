@@ -653,6 +653,28 @@ baseline is at 24, and 21 where it is at 41, and still finishes only 9 ahead.
 Splitting buys room through the easy two thirds and hands most of it back in the
 hard tail, which is what every mid-run lead measured here has done.
 
+**And the threshold it was rejected at was the wrong one.** 12 was inherited
+from those first experiments. Swept by survey on cap 24, with buffering held at
+12:
+
+| clone threshold | gate copies | routed | unroutable |
+|---|---|---|---|
+| none | 0 | 1035 / 1103 | 68 |
+| 12 | 4 | 1060 / 1119 | 59 |
+| **6** | **14** | **1084 / 1131** | **47** |
+| 4 | 39 | 1101 / 1158 | 57 |
+
+Threshold 6 takes the widest NOR from 41 readers to 6 for fourteen extra gates,
+and it is worth 21 connections against the unsplit netlist - comparable to the
+whole spread across every level cap measured, 68 to 98. Push to 4 and it
+reverses: 39 copies route the most connections of any run here, on a netlist 55
+larger, and leave more of them unrouted. The copies stop paying for the space
+they take.
+
+The optimum is also placement-dependent, which is worth knowing before treating
+either knob as settled: on cap 16, threshold 12 beats threshold 6 at the same
+checkpoints where cap 24 shows the reverse.
+
 That also says where the ceiling comes from. Each connection can be helped
 by taking room from its neighbours, right up until the neighbours have
 none left to give, and no constant fixes that. What is needed is
