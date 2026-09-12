@@ -852,6 +852,19 @@ two and was five behind by round six. Both were stopped there rather than run
 out. An extra stage is more relays competing for the same space, which costs
 more than the finer spacing buys.
 
+**Nor is it the choice of neighbour.** Repair rips the nets crowding a failed
+connection, nearest first, one at a time - and every variant above changed how
+*many* of them move, never which. `OHMC_REPAIR_SKIP` passes over the nearest and
+moves the next one instead. On the split netlist that converges at 18 against
+11, seven worse, stopped after three barren rounds there.
+
+It was written first as a radius multiplier, which would have measured nothing
+at all: `crowders` returns nets nearest-first, so a trial that rips one net
+always takes the head of that list however far the radius reaches, and widening
+it only appends farther nets to a tail nothing reads. Worth stating because the
+null version looks like a real experiment right up until it reproduces the
+baseline exactly.
+
 What is left is 39 connections: 18 give up at the search cap, 11 find no route
 at all, 7 cannot hold a repeater, 3 collide with themselves. `gcd` still does
 not place, and nothing measured so far closes a gap this size.
@@ -910,10 +923,11 @@ survey pass from 68 unroutable into 47, and plateau repair then takes that to
 netlist. It converges hard: 47, 37, 28, 19, 18, 16 over the first six rounds,
 11 by round twelve, and then seventeen rounds finding nothing at all.
 
-| cap 24 | survey pass | after plateau repair |
+| | survey pass | after plateau repair |
 |---|---|---|
-| unsplit | 68 | 32 |
-| clone 6 + buffer 12 | 47 | **11** |
+| cap 24, unsplit | 68 | 32 |
+| cap 24, clone 6 + buffer 12 | 47 | **11** |
+| cap 16, clone 12 + buffer 12 | 56 | 28 |
 
 The eleven that remain have no shape to attack. They are eleven connections on
 eleven *different* nets - not one wide net's fan-out, which is what every
