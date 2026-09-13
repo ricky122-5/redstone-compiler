@@ -841,6 +841,24 @@ because ripping three nets displaces enough routed connections that no trial
 comes out ahead and the round keeps nothing. K=2 lost to K=1 on cap 30 the
 same way. What limits repair is not the size of the disturbance it may make.
 
+**Nor does waiting until it stalls.** The obvious answer to that is to widen
+only when a round comes up empty: hold at one net while the trades keep working,
+reach further once they stop. `OHMC_REPAIR_STALL_K` does exactly that, and gives
+12 against 11 - and the log says plainly why:
+
+```text
+net 458 into gate 459: re-routed 15 ripped connection(s): 12 -> 18 undone
+net 520 into gate 521: re-routed  8 ripped connection(s): 12 -> 15 undone
+net  14 into gate 273: re-routed 24 ripped connection(s): 12 -> 21 undone
+```
+
+At four nets a trial displaces eight to twenty-four routed connections, and
+every one of those trials comes back worse and is undone. To win a connection a
+wide rip has to re-place a dozen successfully, which is strictly less likely
+than the single trade it replaced. That is the mechanism behind every
+disturb-more result here, and it is not a tuning failure - the wider rips do
+find things, they just cannot pay for what they break.
+
 **Nor is it the shape of the chain.** A connection's stage count comes from its
 geometry and never varies, so every retry rebuilds a chain of the same shape;
 after plateau repair most of what is left fails *inside* the chain rather than
