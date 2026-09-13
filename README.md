@@ -947,6 +947,22 @@ netlist. It converges hard: 47, 37, 28, 19, 18, 16 over the first six rounds,
 | cap 24, clone 6 + buffer 12 | 47 | **11** |
 | cap 16, clone 12 + buffer 12 | 56 | 28 |
 
+**Pricing their corridors in advance does not free them either.** All eleven
+route alone against the structure, so they are contention, not impossible
+geometry - which makes seeding the obvious last move: charge every cell the
+eleven need, so the other 1120 connections route around them from the start.
+Charged at weight 10 across the 8454 cells they want, the survey pass comes out
+*worse*, 55 against 47, and repair from there reaches 30 where the unseeded run
+was already at 19. Diverting a thousand connections to clear eleven costs more
+than it clears.
+
+(The first attempt at this was a null experiment worth recording: the loader
+keeps only cells that two or more connections want, since a cell one connection
+wants contests nothing. That is right when measuring mutual contention among
+hundreds and wrong for pricing a corridor - with eleven connections barely
+overlapping, it charged 88 cells of 8454. It would have "confirmed" that seeding
+changes nothing.)
+
 The eleven that remain have no shape to attack. They are eleven connections on
 eleven *different* nets - not one wide net's fan-out, which is what every
 earlier failure set was - and they fail four different ways: four find no route
