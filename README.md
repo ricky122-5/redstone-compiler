@@ -1026,13 +1026,23 @@ sits at 16.
      the one-shot descent dust cannot make.
    - **Barycenter placement** and **hardest-first net ordering**.
 
-   Still missing is negotiated congestion (PathFinder): rip-up happens only
-   within a single route, so an early net can take space a later one needs and
-   nothing reconsiders.
+   Negotiated congestion is no longer missing: the repair phase rips the nets
+   crowding a failed connection, re-routes everything it displaced, and keeps
+   the result only if fewer connections are left unrouted. On `gcd` that is
+   worth 36 of them. What is still missing is placement - see item 3.
 
-3. **A flip-flop cell and clock spine — memory element working.** This is the
-   only thing between the compiler and its goal of running `gcd.ohm` in
-   Minecraft.
+   `alu.ohm` has not been re-measured since. That figure predates the level
+   cap, the two relay fixes, all-or-nothing routing, netlist splitting and
+   repair, each of which moved `gcd` substantially, so it should be treated as
+   unknown rather than as a current result.
+
+3. **A flip-flop cell and clock spine — done, and running in the real game.**
+   This was written as the only thing between the compiler and its goal. It is
+   no longer: `tick` and `count` are placed, reset, clocked and read back in an
+   unmodified server, and `gcd` carries a 42-flop register bank with both clock
+   phases and an asynchronous clear distributed to every flop. What blocks
+   `gcd` now is routing density, not memory - see below. The construction
+   lessons are kept because they were expensive to find.
 
    `stamp_rs_latch` in `src/tech.rs` now **holds a bit**: raise an input, drop
    it, and the state persists. It is two cross-coupled NOR cells — the first
@@ -1057,9 +1067,9 @@ sits at 16.
      deterministic simulator rings indefinitely.
 
    `stamp_d_latch` gates it into a D latch — `S = NOR(!D,!E)`, `R = NOR(D,!E)`
-   feeding the RS pair. It places without collision and settles, but Q does not
-   move yet: S and R are not asserting. The geometry is sound, so the fault is
-   in the signal path. Test left in place and `#[ignore]`d.
+   feeding the RS pair — and a master-slave pair of those is the flip-flop the
+   register bank is built from. Both work: the sequential ladder passes in
+   simulation and `count` counts correctly in Minecraft.
 
    Each gate there gets its own X column *and* Z stage — wasteful, deliberately.
    Links then always run forward in Z on a lane unique to their source, which
@@ -1068,7 +1078,14 @@ sits at 16.
    internal gates need each and a caller routing a net to two feeds costs
    nothing.
 
-   Remaining for the goal: make the D latch latch, pair two into a master–slave
-   flip-flop, distribute a clock, and teach the placer to treat flip-flops as
-   macros in a register bank.
+   Remaining for the goal is none of that any more. It is the eleven
+   connections of `gcd` that will not route, and the thing that would close
+   them is real placement: the array is five times wider than packing needs
+   because barycenters are computed from positions that are themselves spread,
+   and no local sweep fixes a circularity. Analytical placement - solving for
+   all positions at once - is the next piece of work, and it is a rewrite of
+   `place_netlist`, not another knob. Every knob has now been swept: the level
+   cap on two netlists, four clone thresholds, buffering alone and combined,
+   grade slack, search budget, search box, tie order, seeding, and four repair
+   policies.
 
