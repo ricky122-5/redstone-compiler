@@ -1082,6 +1082,53 @@ the reset into flip-flop 19. So "0 unroutable" is necessary and not sufficient,
 and the working recipe above is one point in a space whose neighbours fail for
 reasons the headline number never mentions.
 
+**`gcd.ohm` computes in Minecraft.** Placed one block at a time by
+`.mcfunction` into an unmodified server, cleared, loaded and clocked from the
+levers, with a=48 and b=18 on the input bits:
+
+```
+--- input 4656  (a=48,b=18) ---
+  model: ran 25 cycle(s):
+  model:   g = 6
+input 4656:
+   cycle   1: lamps = 0   Q=000000000000000000001100010010000100000000
+   cycle  25: lamps = 6   Q=010000000110000001100000000000000010000000
+   final: 6   Q=010000000110000001100000000000000010000000
+```
+
+The answer lands on the cycle the golden model says it should and holds there.
+The block simulator agrees ahead of the game, reading 6 at cycle 24 of its own
+count and holding it through cycle 29, with the state vector visibly running
+Euclid's algorithm by repeated subtraction: x goes 48, 30, 12, 6 while y goes
+18, 18, 6, 6, and the machine parks in its exit block.
+
+This is the design the whole project was pointed at. It is 583,621 setblock
+commands against 85,992 for the largest design placed in a server before it, and
+the server does not run it in real time: a clock phase that the harness holds
+for forty seconds took the server up to fifteen minutes to work through, so the
+thirty cycles took about three and a half hours of wall time. Command ordering
+is preserved through that backlog, so a slow server gives the circuit more
+settling time rather than less.
+
+**`alu.ohm` places too, and simulates correctly.** It was the design that "still
+fails on its first connection", and nothing since had re-measured it. With the
+riser field widened it routes 572 of 572 with nothing left over - on the survey
+pass, before repair is asked for anything - and writes 177,702 setblock
+commands. Forty input vectors spread across the 2^18 input space, driven through
+one simulator in sequence so latch-up would show, all agree with the gate model;
+worst-case settling is 248 redstone ticks.
+
+| design | survey pass | built | checked |
+|---|---|---|---|
+| `gcd` | 1131 of 1131 after repair | 583,621 blocks | **Minecraft: g=6 at cycle 25** |
+| `alu` | 572 of 572 | 177,702 blocks | simulator: 40 vectors, all correct |
+
+**How much of `gcd` was the placer and how much was the field.** Both, and the
+order matters. The riser field alone takes the old sweep placer from 47
+unroutable to 8, and with repair on top of that it converges at **2** - close,
+and still not a build. The solve is worth exactly those last two. Neither change
+gets there alone.
+
 **Not done — the honest gap:**
 
 1. **The 2-bit adder is 14/16 in the real game, and the harness is the weak
@@ -1113,9 +1160,12 @@ reasons the headline number never mentions.
    sequencing instead of helping, and the lever readback caught that immediately.
    Making the restart robust is the next step, not a compiler change.
 
-2. **Routing scales further but not far enough.** `examples/add.ohm` (99 gates,
-   164 connections) now places in full: 179x123x181, 24654 blocks. `alu.ohm`
-   still fails on its first connection (5/12 approaches, span 176).
+2. **Routing scales further.** `examples/add.ohm` (99 gates, 164 connections)
+   places in full: 179x123x181, 24654 blocks. `alu.ohm` places now too - see
+   above - so the design this item was written about is no longer the frontier.
+   `triangle.ohm` is: 492 gates, 29 flops, and it fails on a 13-block relay hop
+   with no flat run to hold a repeater, under both placers and at every band
+   count tried.
 
    What got it there, in order of how much it mattered:
 
@@ -1141,10 +1191,8 @@ reasons the headline number never mentions.
    reconsiders a connection that succeeded cheaply in a place another
    connection needed more.
 
-   `alu.ohm` has not been re-measured since. That figure predates the level
-   cap, the two relay fixes, all-or-nothing routing, netlist splitting and
-   repair, each of which moved `gcd` substantially, so it should be treated as
-   unknown rather than as a current result.
+   `alu.ohm` has been re-measured, and the old figure was indeed stale by
+   everything on that list plus the riser field: it places in full.
 
 3. **A flip-flop cell and clock spine — done, and running in the real game.**
    This was written as the only thing between the compiler and its goal. It is
@@ -1194,7 +1242,9 @@ reasons the headline number never mentions.
    produced says the circularity was only half the story, and that the riser
    field being thirty blocks deep was costing more than the placer ever did.
 
-   What is left is to run the placed `gcd` in the game: 583,621 setblock
-   commands, against 85,992 for the largest design placed in a real server so
-   far.
+   `gcd` has since been run in the game and reads 6 for gcd(48,18) on the
+   cycle the model says it should. What is left is the two designs that still
+   do not place - `triangle`, which fails the same way under both placers - and
+   the fact that a 583,621-block build runs several times slower than real time
+   in a server, which makes every in-game check an hours-long affair.
 

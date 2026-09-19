@@ -10,7 +10,15 @@ fn main() {
     let path = std::env::args().nth(1).unwrap_or_else(|| "examples/add2.ohm".into());
     let src = std::fs::read_to_string(&path).unwrap();
     let design = lower::lower_program(&parser::parse(&src).unwrap()).unwrap();
-    let comb = bitblast::blast_combinational(&design).unwrap();
+    let mut comb = bitblast::blast_combinational(&design).unwrap();
+    // The same netlist splitting `main` applies, so this sweeps the design the
+    // compiler actually places rather than one that shares a source file.
+    if let Some(t) = std::env::var("OHMC_CLONE").ok().and_then(|v| v.parse::<usize>().ok()) {
+        eprintln!("cloned {} gate copy(s)", comb.clone_high_fanout(t));
+    }
+    if let Some(t) = std::env::var("OHMC_BUFFER").ok().and_then(|v| v.parse::<usize>().ok()) {
+        eprintln!("buffered {} reader group(s)", comb.buffer_high_fanout(t));
+    }
     let lay = layout::build(&comb).unwrap();
 
     let levers: Vec<_> = lay.input_levers.iter().flat_map(|(_, v)| v.clone()).collect();
@@ -23,7 +31,21 @@ fn main() {
     // that answers correctly from reset but sticks once its inputs have moved
     // looks perfect. That is precisely the failure the game showed.
     let mut sim = Sim::new(&lay.grid);
-    for v in 0..(1u64 << levers.len()) {
+    // A full sweep is 2^levers, which is fine for a two-bit adder and
+    // 262144 cases for `alu`. `OHMC_CASES` names how many to run - still
+    // driven through one simulator in sequence, so latch-up is still
+    // observable - and `OHMC_CASE_STEP` spreads them over the input space
+    // instead of taking a prefix that never moves the high bits.
+    let cases: u64 = std::env::var("OHMC_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1u64 << levers.len())
+        .min(1u64 << levers.len());
+    let step: u64 =
+        std::env::var("OHMC_CASE_STEP").ok().and_then(|v| v.parse().ok()).unwrap_or(1).max(1);
+    let span = 1u64 << levers.len();
+    for k in 0..cases {
+        let v = k.wrapping_mul(step) % span;
         for (i, &l) in levers.iter().enumerate() {
             sim.set_lever(l, (v >> i) & 1 == 1);
         }
