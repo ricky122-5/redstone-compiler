@@ -17,7 +17,16 @@ fn main() {
     let src = std::fs::read_to_string(&path).unwrap();
     let prog = parser::parse(&src).unwrap();
     let design = lower::lower_program(&prog).unwrap();
-    let net = bitblast::blast(&design);
+    let mut net = bitblast::blast(&design);
+    // The same netlist splitting `main` applies, so this simulates the design
+    // the compiler actually places rather than a different one that happens to
+    // share a source file.
+    if let Some(t) = std::env::var("OHMC_CLONE").ok().and_then(|v| v.parse::<usize>().ok()) {
+        eprintln!("cloned {} gate copy(s)", net.clone_high_fanout(t));
+    }
+    if let Some(t) = std::env::var("OHMC_BUFFER").ok().and_then(|v| v.parse::<usize>().ok()) {
+        eprintln!("buffered {} reader group(s)", net.buffer_high_fanout(t));
+    }
     let lay = layout::build(&net).expect("must place");
     println!(
         "placed: {} flops, {} levers, {} lamps",
@@ -37,7 +46,15 @@ fn main() {
     let rsts: Vec<Pos> = [lay.rst_lever, lay.net_reset_lever].into_iter().flatten().collect();
     println!("reset levers: {rsts:?}");
 
-    for v in 0..(1usize << levers.len()).min(4) {
+    // Which input vectors to drive. The default sweep is the first few, which
+    // is right for a one-bit design and useless for one with sixteen levers:
+    // `gcd` wants a=48,b=18, not a=0,b=0. `OHMC_SIM_V` names the vectors
+    // outright, packed the way the levers are - port by port, bit 0 first.
+    let vectors: Vec<usize> = match std::env::var("OHMC_SIM_V") {
+        Ok(s) => s.split(',').filter_map(|v| v.trim().parse().ok()).collect(),
+        Err(_) => (0..(1usize << levers.len()).min(4)).collect(),
+    };
+    for v in vectors {
         let mut sim = Sim::new(&lay.grid);
         // Inputs first, so they are stable across the whole run.
         for (b, &l) in levers.iter().enumerate() {
