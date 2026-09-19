@@ -111,10 +111,39 @@ const MAX_DROP: i32 = 12;
 /// broken over another relay.
 const MAX_HOP: i32 = 48;
 
-/// How many Z bands relays are spread over before wrapping.
+/// How many Z bands the register bank's relay chains are shoved across.
 const RELAY_BANDS: i32 = 6;
+/// How many Z bands the riser field spreads gate relays over before wrapping.
+///
+/// Six was the original figure and it is far too few. A band is a lane the
+/// relays of one connection descend through, and with six lanes every relay in
+/// a thousand-connection design lands in a slab thirty blocks deep while the
+/// volume behind it sits empty for hundreds of blocks. Widening the field is
+/// the single largest routability lever measured on `gcd`: 20 unroutable
+/// connections at six bands, 8 at twelve, 4 at twenty-four, 3 at thirty-six.
+/// Past that it flattens - 48 and 72 give 4 and 3 - so the field is wide enough
+/// at thirty-six and further depth only lengthens the trip out and back.
+const RISER_BANDS: i32 = 36;
 /// Z between adjacent relay bands.
 const RELAY_BAND_GAP: i32 = 6;
+
+/// The riser field's shape, as knobs.
+///
+/// Six bands six apart is a slab thirty blocks deep, and every relay in the
+/// design lands in it. That was sized when the field was the only thing in +Z
+/// and never revisited, and it is worth asking whether a thousand connections
+/// want more room than thirty blocks - the volume behind it is empty for
+/// hundreds of blocks.
+fn relay_bands() -> i32 {
+    std::env::var("OHMC_BANDS").ok().and_then(|v| v.parse().ok()).unwrap_or(RISER_BANDS).max(1)
+}
+fn relay_band_gap() -> i32 {
+    std::env::var("OHMC_BAND_GAP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(RELAY_BAND_GAP)
+        .max(1)
+}
 
 /// Z of the first relay stage, south of every gate spine.
 const RISER_Z0: i32 = 14;
@@ -369,6 +398,15 @@ fn staged_route(
         // 200 blocks north was staged through relays 50 blocks south, and stage
         // 3 had nowhere to go. Interpolating keeps every hop on the line between
         // the two ends whichever way that line runs.
+        // The bank's own band count stays at the built-in six.
+        //
+        // `OHMC_BANDS` widens the *riser field*, where a band is a Z lane a
+        // relay chain descends through and a larger index simply means further
+        // out in empty space. Here a band is a perpendicular shove of three
+        // blocks applied to a relay already interpolated onto the line between
+        // its endpoints, so a large index throws the relay clean off the line -
+        // at 24 bands flip-flop 32's D chain was displaced 69 blocks and its
+        // first hop had no buildable shape. Two different meanings, one name.
         let band = (*chain % RELAY_BANDS as usize) as i32;
         let mut rx = rx;
         let mut rz = anchor.2 + (target.2 - anchor.2) * stage / stages + band * 3;
@@ -627,6 +665,68 @@ pub fn place_register_bank(g: &mut Grid, base: Pos, n: usize) -> Result<Register
 /// Returns an error if the netlist contains state: flip-flops need a sequential
 /// floorplan (a clock spine and flip-flop macro cells) that this does not
 /// attempt yet.
+/// Put one level's gates on legal, non-overlapping slots as near as possible to
+/// where the solve wants them.
+///
+/// The obvious legaliser - walk left to right and shove each gate to the first
+/// free spot at or after its wish - is what the sweep placer does, and it is
+/// badly one-sided: a gate whose wish falls behind its predecessor's end is
+/// pushed right, which pushes the next one right, and the row grows rightward
+/// from every collision. Nothing ever moves left, so a row's width is the sum of
+/// its collisions rather than the span its gates actually wanted.
+///
+/// This is Abacus' row placement instead: gates in wish order are gathered into
+/// clusters of touching cells, and a cluster sits at the mean of its members'
+/// wishes (offset by how far each sits inside the cluster) rather than at the
+/// first one's. Clusters that end up overlapping merge and re-centre, so a
+/// collision spreads in both directions and the row stays centred on what it
+/// wanted. It is the exact minimiser of total squared displacement for a fixed
+/// ordering, which is what the solve above is optimising anyway.
+///
+/// `want` must be sorted by wish; each entry is the gate, its wish, and the
+/// pitch it occupies (its own width plus the gap that follows it).
+fn legalize_row(want: &[(Sig, f64, i32)], min_x: f64) -> Vec<(Sig, i32)> {
+    struct Cluster {
+        x: f64,
+        e: f64,
+        q: f64,
+        w: f64,
+        first: usize,
+    }
+    let mut cs: Vec<Cluster> = Vec::new();
+    for (i, &(_, t, pitch)) in want.iter().enumerate() {
+        match cs.last_mut() {
+            Some(c) if c.x + c.w > t => {
+                c.e += 1.0;
+                c.q += t - c.w;
+                c.w += pitch as f64;
+            }
+            _ => cs.push(Cluster { x: t.max(min_x), e: 1.0, q: t, w: pitch as f64, first: i }),
+        }
+        // Re-centre, then absorb backwards for as long as that overlaps.
+        while let Some(c) = cs.last_mut() {
+            c.x = (c.q / c.e).max(min_x);
+            let m = cs.len();
+            if m < 2 || cs[m - 2].x + cs[m - 2].w <= cs[m - 1].x {
+                break;
+            }
+            let cur = cs.pop().unwrap();
+            let prev = cs.last_mut().unwrap();
+            prev.e += cur.e;
+            prev.q += cur.q - cur.e * prev.w;
+            prev.w += cur.w;
+        }
+    }
+    let mut out = Vec::with_capacity(want.len());
+    for c in &cs {
+        let mut x = c.x;
+        for i in c.first..c.first + c.e as usize {
+            out.push((want[i].0, x.round() as i32));
+            x += want[i].2 as f64;
+        }
+    }
+    out
+}
 pub fn build(net: &Netlist) -> Result<Layout, String> {
     let roots = net.roots();
     let level = levelize(net, &roots);
@@ -778,76 +878,220 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     // where nearly all of the improvement is.
     let cell_width = |g: Sig| ((net.operands(g).len().max(1) as i32) - 1) * 2 + 1;
     let mut at_x: HashMap<Sig, i32> = HashMap::new();
-    for pass in 0..2 {
-        for l in 1..=max_level {
-            let Some(row) = by_level.get(&l) else { continue };
-            let mut row = row.clone();
 
-            // Where a gate would like to sit: the mean X of its neighbours in
-            // the netlist. Drivers always; consumers too, once pass one has put
-            // them somewhere.
-            let wish = |g: Sig, at_x: &HashMap<Sig, i32>| -> Option<i64> {
-                // A split copy goes where its own readers are. It reads exactly the
-                // same inputs as every other copy of its gate, so counting its
-                // drivers pulls all the copies back to one place - which is how
-                // cloning and buffering left gcd's hot spots as hot or hotter.
-                if pass > 0 && net.replicas.contains(&g) {
-                    let cs: Vec<i64> = consumers
-                        .get(&g)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|c| at_x.get(c).copied())
-                        .map(|x| x as i64)
-                        .collect();
-                    if !cs.is_empty() {
-                        return Some(cs.iter().sum::<i64>() / cs.len() as i64);
+    // Solve for every gate's X at once instead of sweeping level by level.
+    //
+    // The sweep below (`OHMC_PLACER=sweep`) is a local rule applied in one
+    // direction: a gate goes at the mean of whichever neighbours happen to be
+    // placed already. That is circular. A barycenter is only as good as the
+    // positions it averages, and those came from the same rule one level up, so
+    // a row that is spread stays spread and every row beneath it inherits the
+    // spread. On `gcd` the array comes out several times wider than the gates
+    // themselves need, and the excess is pure wire: it is why connections span
+    // hundreds of blocks on a design whose widest level holds 24 gates.
+    //
+    // Treating placement as the optimisation it is fixes the circularity. With Y
+    // pinned by level, choosing all the X coordinates to minimise total squared
+    // wire length is a one-dimensional quadratic program, and its optimality
+    // condition is exactly "every gate sits at the weighted mean of its
+    // neighbours" - the same local rule, but satisfied everywhere at once rather
+    // than once per level in driver order. Iterating it to a fixed point
+    // (Gauss-Seidel) is the solve.
+    //
+    // Left alone that collapses: with only the levers, the flip-flop ports and
+    // the lamps pinned, the cheapest answer piles every gate onto its anchors.
+    // So the solve alternates with legalisation, as analytical placers do -
+    // solve, spread each level onto legal non-overlapping slots, then re-solve
+    // with every gate tied to where legalisation put it by a spring that
+    // strengthens each round. Early rounds may move a gate a long way; late
+    // rounds only polish, and the last legalised positions are the placement.
+    let analytic = std::env::var("OHMC_PLACER").map(|v| v != "sweep").unwrap_or(true);
+    if analytic {
+        let idx: HashMap<Sig, usize> = gates.iter().enumerate().map(|(i, &g)| (g, i)).collect();
+        let n = gates.len();
+        let numf = |k: &str, d: f64| -> f64 {
+            std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+        };
+        let rounds = numf("OHMC_QP_ROUNDS", 6.0).max(1.0) as usize;
+        let iters = numf("OHMC_QP_ITERS", 400.0).max(1.0) as usize;
+        let mut alpha = numf("OHMC_QP_ALPHA", 0.05);
+        let growth = numf("OHMC_QP_GROWTH", 2.0);
+        // A net's edges are weighted 1/fan-out by default, so a net's total pull
+        // does not grow with the number of readers and one wide net cannot
+        // outvote a hundred narrow ones. `OHMC_QP_FLAT` gives every edge weight
+        // one instead, which is what plain squared wire length asks for.
+        let flat = std::env::var("OHMC_QP_FLAT").is_ok();
+        // How much elbow room to leave between gates on a row, over and above
+        // the gap the sweep placer uses. The solve makes the array as narrow as
+        // wire length alone wants, and narrow is not the same as routable: the
+        // router needs space around a connection as much as it needs the
+        // connection to be short. This is the dial between those two.
+        let spread = numf("OHMC_QP_SPREAD", 8.0) as i32;
+
+        let mut adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        let mut fix_w = vec![0.0f64; n];
+        let mut fix_wx = vec![0.0f64; n];
+        let tie = |g: &HashMap<Sig, usize>,
+                       fw: &mut Vec<f64>,
+                       fwx: &mut Vec<f64>,
+                       s: Sig,
+                       x: f64,
+                       w: f64| {
+            if let Some(&i) = g.get(&s) {
+                fw[i] += w;
+                fwx[i] += w * x;
+            }
+        };
+        // One star per net, centred on its driver - the driver is a real object
+        // with a real position, so no virtual node is needed.
+        for &g in &gates {
+            let gi = idx[&g];
+            for &o in net.operands(g).iter() {
+                let k = consumers.get(&o).map(|v| v.len()).unwrap_or(1).max(1) as f64;
+                let w = if flat { 1.0 } else { 1.0 / k };
+                if let Some(&oi) = idx.get(&o) {
+                    adj[gi].push((oi, w));
+                    adj[oi].push((gi, w));
+                } else if let Some(&p) = source_of.get(&o) {
+                    fix_w[gi] += w;
+                    fix_wx[gi] += w * p.0 as f64;
+                }
+            }
+        }
+        // Sinks outside the gate array pull too, and they are the deepest gates'
+        // only tie to anything fixed: each register's D feed, and each output
+        // bit's lamp pad. Leaving them out lets the tail of the machine drift
+        // wherever the combinational cone happens to put it, which is exactly
+        // where the long connections were.
+        for (i, f) in bank_flops.iter().enumerate() {
+            tie(&idx, &mut fix_w, &mut fix_wx, net.dffs[i].d, f.d_feeds[0].0 as f64, 1.0);
+        }
+        {
+            let mut lx = 0i32;
+            for (_, bits) in &net.outputs {
+                for &b in bits {
+                    tie(&idx, &mut fix_w, &mut fix_wx, b, lx as f64, 1.0);
+                    lx += 3;
+                }
+            }
+        }
+
+        let deg: Vec<f64> =
+            (0..n).map(|i| fix_w[i] + adj[i].iter().map(|&(_, w)| w).sum::<f64>()).collect();
+        let mut x = vec![0.0f64; n];
+        let mut anc_x = vec![0.0f64; n];
+        let mut anc_w = vec![0.0f64; n];
+        for round in 0..rounds {
+            for _ in 0..iters {
+                let mut moved = 0.0f64;
+                for i in 0..n {
+                    let mut num = fix_wx[i] + anc_w[i] * anc_x[i];
+                    let mut den = fix_w[i] + anc_w[i];
+                    for &(j, w) in &adj[i] {
+                        num += w * x[j];
+                        den += w;
+                    }
+                    if den > 0.0 {
+                        let nx = num / den;
+                        moved = moved.max((nx - x[i]).abs());
+                        x[i] = nx;
                     }
                 }
-                let mut xs: Vec<i64> = net
-                    .operands(g)
+                if moved < 0.25 {
+                    break;
+                }
+            }
+            for l in 1..=max_level {
+                let Some(row) = by_level.get(&l) else { continue };
+                let mut want: Vec<(Sig, f64, i32)> = row
                     .iter()
-                    .filter_map(|&sig| {
-                        at_x.get(&sig).copied().or_else(|| source_of.get(&sig).map(|p| p.0))
-                    })
-                    .map(|x| x as i64)
+                    .map(|&g| (g, x[idx[&g]], cell_width(g) + gate_gap() + spread))
                     .collect();
-                if pass > 0 {
-                    xs.extend(
-                        consumers
+                want.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap().then(a.0.cmp(&b.0)));
+                for (g, at) in legalize_row(&want, 0.0) {
+                    at_x.insert(g, at);
+                }
+            }
+            if round + 1 < rounds {
+                for i in 0..n {
+                    anc_x[i] = at_x[&gates[i]] as f64;
+                    anc_w[i] = deg[i] * alpha;
+                }
+                alpha *= growth;
+            }
+        }
+    } else {
+        for pass in 0..2 {
+            for l in 1..=max_level {
+                let Some(row) = by_level.get(&l) else { continue };
+                let mut row = row.clone();
+
+                // Where a gate would like to sit: the mean X of its neighbours in
+                // the netlist. Drivers always; consumers too, once pass one has put
+                // them somewhere.
+                let wish = |g: Sig, at_x: &HashMap<Sig, i32>| -> Option<i64> {
+                    // A split copy goes where its own readers are. It reads exactly the
+                    // same inputs as every other copy of its gate, so counting its
+                    // drivers pulls all the copies back to one place - which is how
+                    // cloning and buffering left gcd's hot spots as hot or hotter.
+                    if pass > 0 && net.replicas.contains(&g) {
+                        let cs: Vec<i64> = consumers
                             .get(&g)
                             .into_iter()
                             .flatten()
                             .filter_map(|c| at_x.get(c).copied())
-                            .map(|x| x as i64),
-                    );
-                }
-                if xs.is_empty() {
-                    None
-                } else {
-                    Some(xs.iter().sum::<i64>() / xs.len() as i64)
-                }
-            };
+                            .map(|x| x as i64)
+                            .collect();
+                        if !cs.is_empty() {
+                            return Some(cs.iter().sum::<i64>() / cs.len() as i64);
+                        }
+                    }
+                    let mut xs: Vec<i64> = net
+                        .operands(g)
+                        .iter()
+                        .filter_map(|&sig| {
+                            at_x.get(&sig).copied().or_else(|| source_of.get(&sig).map(|p| p.0))
+                        })
+                        .map(|x| x as i64)
+                        .collect();
+                    if pass > 0 {
+                        xs.extend(
+                            consumers
+                                .get(&g)
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|c| at_x.get(c).copied())
+                                .map(|x| x as i64),
+                        );
+                    }
+                    if xs.is_empty() {
+                        None
+                    } else {
+                        Some(xs.iter().sum::<i64>() / xs.len() as i64)
+                    }
+                };
 
-            row.sort_by_key(|&g| (wish(g, &at_x).unwrap_or(i64::MIN / 2), g));
+                row.sort_by_key(|&g| (wish(g, &at_x).unwrap_or(i64::MIN / 2), g));
 
-            // Place each gate *at* its barycenter, not merely in barycenter
-            // order. Ordering alone is not placement: every row used to be
-            // packed from x = 0, so a level with three gates hugged the origin
-            // however far away its drivers were - and in `tick` that put a gate
-            // at x = 0 fed by a spine at x = 163, a connection crossing the
-            // entire build diagonally. With 141 such connections the router
-            // never got past the fifth.
-            //
-            // Sorted by desired X, a single left-to-right sweep places each gate
-            // at its wish or at the first free spot after its predecessor,
-            // whichever is further right. The classic linear-placement sweep: it
-            // keeps the ordering, never overlaps, and collapses to the old
-            // behaviour when every wish is at the origin.
-            let mut x = 0;
-            for g in row {
-                let at = wish(g, &at_x).map_or(x, |w| (w as i32).max(x)).max(0);
-                at_x.insert(g, at);
-                x = at + cell_width(g) + gate_gap();
+                // Place each gate *at* its barycenter, not merely in barycenter
+                // order. Ordering alone is not placement: every row used to be
+                // packed from x = 0, so a level with three gates hugged the origin
+                // however far away its drivers were - and in `tick` that put a gate
+                // at x = 0 fed by a spine at x = 163, a connection crossing the
+                // entire build diagonally. With 141 such connections the router
+                // never got past the fifth.
+                //
+                // Sorted by desired X, a single left-to-right sweep places each gate
+                // at its wish or at the first free spot after its predecessor,
+                // whichever is further right. The classic linear-placement sweep: it
+                // keeps the ordering, never overlaps, and collapses to the old
+                // behaviour when every wish is at the origin.
+                let mut x = 0;
+                for g in row {
+                    let at = wish(g, &at_x).map_or(x, |w| (w as i32).max(x)).max(0);
+                    at_x.insert(g, at);
+                    x = at + cell_width(g) + gate_gap();
+                }
             }
         }
     }
@@ -869,13 +1113,64 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         }
     }
 
+    // What the placement actually looks like, without paying for a route.
+    //
+    // Every placement experiment so far has been scored by the router, which
+    // takes minutes and mixes the placement's quality with the router's luck.
+    // Width and span are the two things a placer is actually choosing between,
+    // and they are free to compute.
+    if std::env::var("OHMC_GEOM").is_ok() {
+        let mut spans: Vec<i64> = Vec::new();
+        for &g in &gates {
+            let Some(pg) = placed.get(&g) else { continue };
+            for &o in net.operands(g).iter() {
+                let sx = placed
+                    .get(&o)
+                    .map(|p| p.cell.out.0)
+                    .or_else(|| source_of.get(&o).map(|p| p.0));
+                if let Some(sx) = sx {
+                    spans.push((sx - pg.cell.out.0).abs() as i64);
+                }
+            }
+        }
+        spans.sort_unstable();
+        let n = spans.len().max(1);
+        let rows: Vec<i32> = (1..=max_level)
+            .filter_map(|l| by_level.get(&l))
+            .map(|row| {
+                let xs: Vec<i32> = row.iter().filter_map(|g| at_x.get(g).copied()).collect();
+                match (xs.iter().min(), xs.iter().max()) {
+                    (Some(&a), Some(&b)) => b - a,
+                    _ => 0,
+                }
+            })
+            .collect();
+        eprintln!(
+            "geom: array width {widest}, widest level {}, mean level width {}",
+            rows.iter().max().copied().unwrap_or(0),
+            rows.iter().sum::<i32>() / (rows.len().max(1) as i32),
+        );
+        eprintln!(
+            "geom: {n} connections, mean X span {}, median {}, p90 {}, max {}",
+            spans.iter().sum::<i64>() / n as i64,
+            spans[n / 2],
+            spans[n * 9 / 10],
+            spans.last().copied().unwrap_or(0),
+        );
+        return Err("geometry report only".into());
+    }
+
     // The routing volume: the gate rows plus generous free space around them.
     // Room for the riser field: one private column per connection, plus enough
     // Z for the deepest relay chain.
     let max_stages = ((max_level + 2) * LEVEL_H / MAX_DROP) + 2;
     let total_conns: i32 = gates.iter().map(|&g| net.operands(g).len() as i32).sum();
     let span = (widest + 8 + 3 * total_conns.max(1)).max(32);
-    let depth = (gates.len() as i32).max(8) * 2 + 24 + RISER_Z0 + max_stages * RISER_PITCH;
+    let depth = (gates.len() as i32).max(8) * 2
+        + 24
+        + RISER_Z0
+        + relay_bands() * relay_band_gap()
+        + max_stages * RISER_PITCH;
     // Bounds must cover everything already placed, not just the gate array.
     //
     // They used to be derived from the gate array's own width and depth. A
@@ -1671,8 +1966,8 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             //
             // This is not the old per-chain allocator that put alu's first chain
             // at z = 437: bands wrap, so the field's depth is fixed by
-            // RELAY_BANDS however many connections the design has.
-            let band = (chain % RELAY_BANDS as usize) as i32;
+            // RISER_BANDS however many connections the design has.
+            let band = (chain % relay_bands() as usize) as i32;
             // Bring the chain home in Z as well as in X and Y.
             //
             // Every relay used to sit at a fixed depth in the riser field, south
@@ -1698,7 +1993,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             // The band offset stays, and stays constant along a chain, so
             // chains still separate from each other without any hop paying for
             // it.
-            let z0 = RISER_Z0 + band * RELAY_BAND_GAP + (stage % 2) * 4;
+            let z0 = RISER_Z0 + band * relay_band_gap() + (stage % 2) * 4;
             let mut rx = rx;
             let mut rz = z0 + (feed.2 - z0) * stage / stages;
 

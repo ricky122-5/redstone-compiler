@@ -979,6 +979,109 @@ re-tuned per netlist but does not move further**: under threshold-6 cloning,
 caps 20 and 28 sit at 34 and 35 unroutable by 600 connections taken where cap 24
 sits at 16.
 
+**`gcd.ohm` places. 1131 of 1131 connections routed, 583,621 setblock
+commands.** Two changes got the last eleven, and neither was another repair
+knob: the placer stopped sweeping and started solving, and the riser field
+stopped being thirty blocks deep.
+
+**Placement is an optimisation problem, and the sweep was solving the wrong
+one.** The old placer put each gate at the mean X of whichever neighbours had
+already been placed, level by level, twice. That rule is circular: a barycenter
+is only as good as the positions it averages, and those came from the same rule
+one level up, so a spread row stays spread and every row beneath inherits the
+spread.
+
+With Y pinned by level, choosing all the X coordinates to minimise total squared
+wire length is a one-dimensional quadratic program whose optimality condition is
+exactly "every gate sits at the weighted mean of its neighbours" - the same local
+rule, but satisfied everywhere at once instead of once per level in driver
+order. Iterating it to a fixed point is the solve; it runs in milliseconds. Left
+alone it collapses onto the anchors, so it alternates with legalisation the way
+analytical placers do: solve, spread each level onto legal slots, re-solve with
+every gate tied to where legalisation put it by a spring that strengthens each
+round.
+
+Legalisation is Abacus rather than a shove-right sweep, and that part matters on
+its own. Shoving right is one-sided - a gate that lands behind its predecessor's
+end pushes it right, which pushes the next one right - so a row's width ends up
+being the sum of its collisions. Abacus gathers touching gates into clusters and
+puts each cluster at the mean of its members' wishes, so a collision spreads both
+ways and the row stays centred on what it wanted.
+
+**And narrower is not better, which is the whole reason this took so long to
+find.** The solve alone makes `gcd`'s array 290 blocks wide against the sweep's
+402, with the mean connection spanning 27 blocks against 38 - and it routes
+*far* worse, 90 unroutable against 47. The router needs room around a connection
+as much as it needs the connection to be short. `OHMC_QP_SPREAD` is the dial
+between the two: extra pitch handed to the legaliser, over and above the gate
+gap.
+
+| placer | array width | mean X span | unroutable |
+|---|---|---|---|
+| sweep, gap 6 (the old default) | 402 | 38 | 47 |
+| sweep, gap 14 | 651 | 66 | 22 |
+| solve, spread 0 | 290 | 27 | 90 |
+| solve, spread 4 | 338 | 36 | 23 |
+| solve, spread 8 | 416 | 47 | **20** |
+| solve, spread 12 | 507 | 59 | 18 |
+| solve, spread 16 | - | - | 22 |
+
+Read honestly, that table says **most of the gain is room, not the solve**:
+giving the old sweep a gap of 14 takes it from 47 to 22, which is where the
+solve lands. What the solve adds is that it buys the same routability in a 416-
+block array where the sweep needs 651, and spreads 4 through 16 all sit between
+18 and 28 - the difference between them is noise, and 8 is not a tuned optimum
+so much as a point inside a flat basin.
+
+**The riser field was thirty blocks deep, and that was the real wall.** Every
+relay in the design lands in a band of the field south of the gate array, and
+there were six bands six apart - a figure set when the field was the only thing
+in +Z and never revisited. The volume behind it is empty for hundreds of blocks.
+Widening it is the largest single lever measured on this design:
+
+| riser bands | unroutable |
+|---|---|
+| 6 (the old default) | 20 |
+| 12 | 8 |
+| 24 | 4 |
+| **36** | **3** |
+| 48 | 4 |
+| 72 | 3 |
+
+It flattens past thirty-six, which is what a saturated constraint looks like:
+once there is a free lane for every chain that wants one, more depth only
+lengthens the trip out and back. It is not specific to the new placer either -
+the old sweep goes from 47 to 8 on twenty-four bands - so this was costing every
+design in the project, `alu` included, for as long as the field has existed.
+
+**Plateau repair then finishes it.** From 3 the repair phase takes two rounds
+and the build completes: `1131 of 1131 routed, 0 unroutable`, and `ohmc` goes on
+to wire the register bank and write the function.
+
+```
+OHMC_SURVEY=1 OHMC_RIPS=0 OHMC_REPAIR=40 OHMC_REPAIR_PLATEAU=30 \
+OHMC_LEVEL_CAP=24 OHMC_CLONE=6 OHMC_BUFFER=12 \
+  ohmc examples/gcd.ohm --mcfn gcd.mcfunction
+```
+
+**One band count is two different things, and conflating them broke the bank.**
+`OHMC_BANDS` widens the riser field, where a band is a Z lane a relay chain
+descends through and a larger index just means further out into empty space. The
+register bank's own staging uses the same word for something else: a
+perpendicular shove of three blocks applied to a relay already interpolated onto
+the line between its endpoints. At twenty-four bands that threw flip-flop 32's D
+chain sixty-nine blocks off its line and the first hop had no buildable shape.
+They are separate constants now.
+
+**The survey metric does not cover the register bank, and that hides failures.**
+It counts gate connections only - the clock, reset and D trunks are routed after
+it, against whatever grid the gate connections left behind. Two configurations
+that reach zero unroutable connections still fail to build: twenty-four bands
+loses the clock trunk into flip-flop 13, and spread 12 at thirty-six bands loses
+the reset into flip-flop 19. So "0 unroutable" is necessary and not sufficient,
+and the working recipe above is one point in a space whose neighbours fail for
+reasons the headline number never mentions.
+
 **Not done — the honest gap:**
 
 1. **The 2-bit adder is 14/16 in the real game, and the harness is the weak
@@ -1029,7 +1132,14 @@ sits at 16.
    Negotiated congestion is no longer missing: the repair phase rips the nets
    crowding a failed connection, re-routes everything it displaced, and keeps
    the result only if fewer connections are left unrouted. On `gcd` that is
-   worth 36 of them. What is still missing is placement - see item 3.
+   worth 36 of them, and the last 3 once the riser field is wide enough.
+
+   It is still not PathFinder, though, and the distinction is worth keeping:
+   repair perturbs the neighbourhood of a connection that has already failed,
+   where PathFinder reroutes *every* net every iteration against a congestion
+   cost that grows until no two nets want the same cell. Nothing here ever
+   reconsiders a connection that succeeded cheaply in a place another
+   connection needed more.
 
    `alu.ohm` has not been re-measured since. That figure predates the level
    cap, the two relay fixes, all-or-nothing routing, netlist splitting and
@@ -1078,14 +1188,13 @@ sits at 16.
    internal gates need each and a caller routing a net to two feeds costs
    nothing.
 
-   Remaining for the goal is none of that any more. It is the eleven
-   connections of `gcd` that will not route, and the thing that would close
-   them is real placement: the array is five times wider than packing needs
-   because barycenters are computed from positions that are themselves spread,
-   and no local sweep fixes a circularity. Analytical placement - solving for
-   all positions at once - is the next piece of work, and it is a rewrite of
-   `place_netlist`, not another knob. Every knob has now been swept: the level
-   cap on two netlists, four clone thresholds, buffering alone and combined,
-   grade slack, search budget, search box, tie order, seeding, and four repair
-   policies.
+   Remaining for the goal is none of that any more, and as of the section
+   above it is not placement either: `gcd` places in full. Analytical placement
+   was indeed the next piece of work and it was built - but the measurement it
+   produced says the circularity was only half the story, and that the riser
+   field being thirty blocks deep was costing more than the placer ever did.
+
+   What is left is to run the placed `gcd` in the game: 583,621 setblock
+   commands, against 85,992 for the largest design placed in a real server so
+   far.
 
