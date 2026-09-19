@@ -966,11 +966,15 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         for (i, f) in bank_flops.iter().enumerate() {
             tie(&idx, &mut fix_w, &mut fix_wx, net.dffs[i].d, f.d_feeds[0].0 as f64, 1.0);
         }
-        // Output lamps are *not* anchors. They used to sit in a row from the
-        // origin whatever drove them, which made them a real pull on the
-        // deepest gates in the design - and a badly aimed one, since that row's
-        // order has nothing to do with the logic. Lamps follow their driver
-        // now, so an output bit constrains nothing.
+        {
+            let mut lx = 0i32;
+            for (_, bits) in &net.outputs {
+                for &b in bits {
+                    tie(&idx, &mut fix_w, &mut fix_wx, b, lx as f64, 1.0);
+                    lx += 3;
+                }
+            }
+        }
 
         let deg: Vec<f64> =
             (0..n).map(|i| fix_w[i] + adj[i].iter().map(|&(_, w)| w).sum::<f64>()).collect();
@@ -1200,48 +1204,23 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     // exactly the one-shot drop that dust cannot make - it was the last thing
     // standing between `add.ohm` and a complete route. The compiler reports
     // every lamp's coordinates anyway, so nothing downstream needs them aligned.
-    // And each lamp sits below its driver in X as well as in Y.
-    //
-    // Y already followed the driver; X never did, and stayed a tidy row from
-    // the origin in output order. That was invisible while the placer packed
-    // every row from x = 0 - the drivers were near the origin too - and it
-    // stopped being invisible the moment placement started putting gates where
-    // their wires wanted them. On `triangle` it is the whole remaining failure:
-    // all 783 gate connections route and then the hop from a driver out in the
-    // middle of the array to its lamp near the origin exhausts the search, on a
-    // design whose logic is otherwise completely placed.
-    //
-    // Two lamps that want the same column are pushed apart, three at a time,
-    // which is the same pitch the old row used.
     let mut lamp_pad: Vec<(String, Vec<(Sig, Pos, Pos)>)> = Vec::new();
     {
-        let row = std::env::var("OHMC_LAMP_ROW").is_ok();
-        let mut row_x = 0;
-        let mut taken: HashSet<(i32, i32)> = HashSet::new();
+        let mut lamp_x = 0;
         for (name, bits) in &net.outputs {
             let mut v = Vec::new();
             for &b in bits {
-                // An output bit is not always a gate. `total = acc` hands the
-                // output straight to a register, and `placed` knows nothing
-                // about those - so the driver has to be looked for among the
-                // sources too, or the lamp falls back to an arbitrary column.
-                let drv =
-                    placed.get(&b).map(|p| p.cell.out).or_else(|| source_of.get(&b).copied());
-                let drv_y = drv.map(|p| p.1).unwrap_or(lever_y);
+                let drv_y = placed.get(&b).map(|p| p.cell.out.1).unwrap_or(lever_y);
                 // Far enough below and along that the descent has room. Wire
                 // nodes in one column must differ by three in Y, so a short hop
                 // with a small drop has nowhere to put its middle and the path
                 // ends up colliding with itself.
                 let y = drv_y - 4;
-                let mut x = if row { row_x } else { drv.map(|p| p.0).unwrap_or(row_x).max(0) };
-                while !taken.insert((x, y)) {
-                    x += 3;
-                }
-                row_x += 3;
-                let pad = (x, y, GATE_Z + 14);
-                let lamp = (x, y - 1, GATE_Z + 14);
+                let pad = (lamp_x, y, GATE_Z + 14);
+                let lamp = (lamp_x, y - 1, GATE_Z + 14);
                 stamp_lamp(&mut grid, lamp)?;
                 v.push((b, pad, lamp));
+                lamp_x += 3;
             }
             lamp_pad.push((name.clone(), v));
         }
@@ -2451,29 +2430,9 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         for &(b, pad, lamp) in entries {
             let sources = &spine[&b];
             let decay = sources.len() as i32 - 1;
-            // Staged, like every other long net in the build.
-            //
-            // This was the one connection still routed by a single search, and
-            // it got away with it for as long as every output bit was driven by
-            // a gate a few blocks above its lamp. An output that *is* a register
-            // - `total = acc` in `triangle.ohm` - is driven from the bank
-            // instead, which sits a couple of hundred blocks behind the gate
-            // array in Z, so the hop is 243 blocks in one shot and the search
-            // burns its whole budget getting 48 blocks from the target. Nothing
-            // about a lamp makes it exempt from the staging every other net of
-            // that length gets.
-            staged_route(
-                &mut grid,
-                &mut router,
-                b,
-                sources,
-                pad,
-                bounds,
-                Material::PortOut,
-                decay,
-                &mut chain_seq,
-            )
-            .map_err(|e| format!("routing output `{name}` to its lamp: {e}"))?;
+            router
+                .route(&mut grid, b, sources, pad, bounds, Material::PortOut, decay)
+                .map_err(|e| format!("routing output `{name}` to its lamp: {e}"))?;
             lamps.push(lamp);
         }
         output_lamps.push((name.clone(), lamps));
