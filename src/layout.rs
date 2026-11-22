@@ -37,6 +37,11 @@ const LEVEL_H: i32 = 6;
 /// Z of every gate row. Cells occupy `z-1 ..= z+2`, leaving the rest of Z open
 /// for routing.
 const GATE_Z: i32 = 0;
+/// Radius of the shell reserved around each output lamp for its own net.
+const LAMP_SHELL: i32 = 2;
+/// X between adjacent output lamps. Closer than two shells, so shells overlap;
+/// see where they are reserved for how the overlap is shared out.
+const LAMP_PITCH: i32 = 3;
 /// Spare X columns between adjacent gates in a row.
 /// Horizontal gap between gates in a level.
 ///
@@ -971,7 +976,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             for (_, bits) in &net.outputs {
                 for &b in bits {
                     tie(&idx, &mut fix_w, &mut fix_wx, b, lx as f64, 1.0);
-                    lx += 3;
+                    lx += LAMP_PITCH;
                 }
             }
         }
@@ -1220,7 +1225,7 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
                 let lamp = (lamp_x, y - 1, GATE_Z + 14);
                 stamp_lamp(&mut grid, lamp)?;
                 v.push((b, pad, lamp));
-                lamp_x += 3;
+                lamp_x += LAMP_PITCH;
             }
             lamp_pad.push((name.clone(), v));
         }
@@ -1257,6 +1262,15 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
             if !grid.is_free(p) || !grid.is_free((p.0, p.1 - 1, p.2)) {
                 break;
             }
+            // The spine is laid with `grid.set` and `claim`, not routed, so
+            // keepout never saw it. In `gcd` the spine of flop 34's Q ran past
+            // the edge of flop 41's macro, one step below that macro's own dust,
+            // and joined the two: once the machine reached its return state, Q
+            // held flop 41's latch, and `halted` could never load. A spine stops
+            // where it would touch anything that is not its own.
+            if router.touches_foreign(p, s) {
+                break;
+            }
             grid.set((p.0, p.1 - 1, p.2), Block::Solid(Material::Wire))?;
             router.claim(p, s);
             if t % SPINE_REFRESH == 0 {
@@ -1278,15 +1292,45 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
     // that some other signal energises - turns an output on regardless of what
     // the circuit computed. Reserving a shell around each lamp for its own net
     // is what makes a multi-bit result mean anything.
+    //
+    // Adjacent lamps' shells overlap, and the overlap goes to the *nearest*
+    // lamp. It used to go to whichever was reserved first, which handed the
+    // earlier bit's net cells right beside the next lamp: in `triangle`, bit
+    // 3's wire crossed the solid block next to bit 4's lamp, powered it, and a
+    // register holding 15 read 31. Nearest-wins means every cell touching a
+    // lamp belongs to that lamp's net. A cell equally near two lamps of
+    // different nets is given to neither.
+    //
+    // Spreading the lamps two shells apart would also end the overlap, and was
+    // tried first. It moves the placer's output anchors, so the whole build
+    // moves: `gcd` then read 2 for 6 and `triangle` stopped settling. This
+    // changes nothing upstream of the lamps.
+    let mut shell: HashMap<Pos, (i32, Option<Sig>)> = HashMap::new();
     for (_, entries) in &lamp_pad {
         for &(b, _, lamp) in entries {
-            for dx in -2..=2i32 {
-                for dy in -2..=2i32 {
-                    for dz in -2..=2i32 {
-                        router.reserve((lamp.0 + dx, lamp.1 + dy, lamp.2 + dz), b);
+            for dx in -LAMP_SHELL..=LAMP_SHELL {
+                for dy in -LAMP_SHELL..=LAMP_SHELL {
+                    for dz in -LAMP_SHELL..=LAMP_SHELL {
+                        let d = dx * dx + dy * dy + dz * dz;
+                        let p = (lamp.0 + dx, lamp.1 + dy, lamp.2 + dz);
+                        let e = shell.entry(p).or_insert((d, Some(b)));
+                        if d < e.0 {
+                            *e = (d, Some(b));
+                        } else if d == e.0 && e.1 != Some(b) {
+                            e.1 = None;
+                        }
                     }
                 }
             }
+        }
+    }
+    // Sorted, so the router's records come out in the same order every run.
+    let mut shell: Vec<(Pos, Option<Sig>)> = shell.into_iter().map(|(p, (_, o))| (p, o)).collect();
+    shell.sort_unstable();
+    for (p, owner) in shell {
+        match owner {
+            Some(b) => router.reserve(p, b),
+            None => router.block(p),
         }
     }
 
@@ -2430,9 +2474,30 @@ pub fn build(net: &Netlist) -> Result<Layout, String> {
         for &(b, pad, lamp) in entries {
             let sources = &spine[&b];
             let decay = sources.len() as i32 - 1;
-            router
-                .route(&mut grid, b, sources, pad, bounds, Material::PortOut, decay)
-                .map_err(|e| format!("routing output `{name}` to its lamp: {e}"))?;
+            // Staged, like every other long net in the build.
+            //
+            // This was the last connection still routed by a single search,
+            // which is fine for a gate a few blocks above its lamp and hopeless
+            // for an output that *is* a register: `total = acc` in
+            // `triangle.ohm` is driven from the bank, behind the gate array in
+            // Z, and the one-shot hop spans 243 blocks and gives up 48 short.
+            //
+            // 631dfb8 staged this and also moved each lamp under its driver in
+            // X, and both designs then collided at the first bit's pad. The two
+            // halves were never measured apart. Staging alone places `triangle`
+            // and keeps `gcd` complete; it was the X move that collided.
+            staged_route(
+                &mut grid,
+                &mut router,
+                b,
+                sources,
+                pad,
+                bounds,
+                Material::PortOut,
+                decay,
+                &mut chain_seq,
+            )
+            .map_err(|e| format!("routing output `{name}` to its lamp: {e}"))?;
             lamps.push(lamp);
         }
         output_lamps.push((name.clone(), lamps));

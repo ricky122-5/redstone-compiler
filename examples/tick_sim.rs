@@ -86,6 +86,33 @@ fn main() {
             sim.set_lever(clk, true);
             sim.set_lever(clkn, false);
             let (a, oka) = sim.run_until_stable(budget);
+            // The clock-high half of `OHMC_FLOP_PROBE`: what each named flop
+            // sees while its master is meant to be open.
+            if let Ok(fs) = std::env::var("OHMC_FLOP_PROBE") {
+                let f = sim.field();
+                for i in fs.split(',').filter_map(|v| v.parse::<usize>().ok()) {
+                    let fp = &lay.flop_ports[i];
+                    let pw = |v: &Vec<Pos>| v.iter().map(|&p| f.dust_at(p)).collect::<Vec<u8>>();
+                    eprintln!(
+                        "      [clk high] flop {i} d={:?} clk={:?} clk_n={:?} master_q={}",
+                        pw(&fp.d_feeds), pw(&fp.clk_feeds), pw(&fp.clk_n_feeds), f.dust_at(fp.master_q)
+                    );
+                    // Every powered cell of the macro, relative to its D feed,
+                    // so a dead flop can be diffed against a live one.
+                    if std::env::var("OHMC_FLOP_CELLS").is_ok() {
+                        let all: Vec<Pos> = [fp.d_feeds.clone(), fp.clk_feeds.clone(), fp.clk_n_feeds.clone(), fp.clr_feeds.clone(), vec![fp.q, fp.master_q, fp.q_port]].concat();
+                        let lo = (all.iter().map(|p| p.0).min().unwrap() - 2, all.iter().map(|p| p.1).min().unwrap() - 4, all.iter().map(|p| p.2).min().unwrap() - 2);
+                        let hi = (all.iter().map(|p| p.0).max().unwrap() + 2, all.iter().map(|p| p.1).max().unwrap() + 4, all.iter().map(|p| p.2).max().unwrap() + 2);
+                        let o = fp.d_feeds[0];
+                        for x in lo.0..=hi.0 { for y in lo.1..=hi.1 { for z in lo.2..=hi.2 {
+                            let p = (x, y, z);
+                            if matches!(lay.grid.get(p), ohmc::world::Block::Dust { .. }) && lay.wire_owner.get(&p).map_or(true, |&w| w == u32::MAX) {
+                                eprintln!("        cell flop {i} rel ({},{},{}) power {}", x - o.0, y - o.1, z - o.2, f.dust_at(p));
+                            }
+                        }}}
+                    }
+                }
+            }
             sim.set_lever(clk, false);
             sim.set_lever(clkn, true);
             let (b, okb) = sim.run_until_stable(budget);
@@ -130,6 +157,19 @@ fn main() {
                 .map(|p| if f.dust_at(p.q) > 0 { '1' } else { '0' })
                 .collect();
             eprintln!("  cycle {c:>3}: lamps={now} Q={state} ticks={ticks} settled={ok} {:?}", t.elapsed());
+            // `OHMC_FLOP_PROBE=i,j`: power at each named flop's D feeds, every
+            // cycle - whether a flop that never loads is being given its 1.
+            if let Ok(fs) = std::env::var("OHMC_FLOP_PROBE") {
+                for i in fs.split(',').filter_map(|v| v.parse::<usize>().ok()) {
+                    let fp = &lay.flop_ports[i];
+                    let d: Vec<u8> = fp.d_feeds.iter().map(|&p| f.dust_at(p)).collect();
+                    let pw = |v: &Vec<Pos>| v.iter().map(|&p| f.dust_at(p)).collect::<Vec<u8>>();
+                    eprintln!(
+                        "      flop {i} d {:?}={d:?} clk={:?} clk_n={:?} clr={:?} q={}",
+                        fp.d_feeds, pw(&fp.clk_feeds), pw(&fp.clk_n_feeds), pw(&fp.clr_feeds), f.dust_at(fp.q)
+                    );
+                }
+            }
             trace.push(now);
         }
 
@@ -168,6 +208,20 @@ fn main() {
                 format!("{} after {c} cycles", outs.join(" "))
             })
             .unwrap_or_else(|e| format!("model error: {e}"));
+
+        // `OHMC_DUMP_NET=n`: where net n's signal stands once the run ends, cell
+        // by cell along the wire. A lamp that is dark with its register set
+        // can then be traced to the cell where the signal stops.
+        if let Some(n) = std::env::var("OHMC_DUMP_NET").ok().and_then(|v| v.parse::<u32>().ok()) {
+            let f = sim.field();
+            let mut cells: Vec<_> =
+                lay.wire_owner.iter().filter(|&(_, &o)| o == n).map(|(&p, _)| p).collect();
+            cells.sort_by_key(|p| (p.2, p.0, p.1));
+            println!("net {n} after cycle {}:", cycles - 1);
+            for c in cells {
+                println!("  {c:?} {:?} power={}", lay.grid.get(c), f.dust_at(c));
+            }
+        }
 
         let last = *trace.last().unwrap();
         let settledness = if ok_r && ok_r2 && settled { "" } else { "  [UNSTABLE]" };

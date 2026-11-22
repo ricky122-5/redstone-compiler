@@ -37,6 +37,22 @@ pub type NetId = u32;
 /// short straight into that gate's input.
 pub const PREPLACED: NetId = u32::MAX;
 
+/// `OHMC_WATCH="x,y,z"`: report who gives that cell an owner, with a backtrace.
+/// For a wire that keepout should have refused, the question is which writer
+/// skipped the check.
+fn watch(p: Pos, net: NetId, how: &str) {
+    use std::sync::OnceLock;
+    static W: OnceLock<Option<Pos>> = OnceLock::new();
+    let w = W.get_or_init(|| {
+        let v: Vec<i32> = std::env::var("OHMC_WATCH").ok()?.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        (v.len() == 3).then(|| (v[0], v[1], v[2]))
+    });
+    if *w == Some(p) {
+        eprintln!("WATCH {p:?} -> net {net} via {how}\n{}", std::backtrace::Backtrace::force_capture());
+    }
+}
+
+
 /// How much wider than default to make each search box. Read once.
 fn margin_factor() -> i32 {
     static F: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
@@ -258,6 +274,21 @@ impl Router {
                     if c != p {
                         r.lever_hazard.insert(c, p);
                     }
+                }
+            }
+            // A torch energises every dust cell beside it, just as a lever does.
+            // The comment above has said so all along; the code only ever
+            // handled levers. In `gcd`, net 47 ran orthogonally beside a lit
+            // gate torch, read 15 from it whenever that unrelated gate was high,
+            // and its relay repeaters carried the false 1 on to the gates that
+            // load `g[2]` and `halted` - so the machine never halted and bit 2
+            // of the answer stayed off.
+            //
+            // Hazard, not block, for the same reason as the lever's support: the
+            // torch's own output net attaches beside it and may pass there.
+            if matches!(b, Block::WallTorch { .. } | Block::Torch { .. }) {
+                for c in Dir::ALL.iter().map(|&d| offset(p, d)).chain([up(p), crate::world::down(p)]) {
+                    r.lever_hazard.entry(c).or_insert(p);
                 }
             }
             if matches!(b, Block::Dust { .. }) {
@@ -534,6 +565,7 @@ impl Router {
     /// Declare that the dust at `p` belongs to `net` (e.g. a cell's output or
     /// an input feed), so routes for that net may attach to it.
     pub fn claim(&mut self, p: Pos, net: NetId) {
+        watch(p, net, "claim");
         let prev = self.owner.insert(p, net);
         if prev != Some(net) {
             self.note(Undo::Owner(p, prev));
@@ -544,6 +576,23 @@ impl Router {
         if self.blocked.remove(&p) {
             self.note(Undo::Unblocked(p));
         }
+    }
+
+    /// Would dust at `p` touch wire that is not `net`'s - orthogonally, a step
+    /// up or down, or straight above or below - or sit beside a torch or lever
+    /// support of another net? The keepout half of [`Self::placeable`], for code
+    /// that lays wire with `grid.set` and `claim` instead of routing it.
+    pub fn touches_foreign(&self, p: Pos, net: NetId) -> bool {
+        if self.lever_hazard.contains_key(&p) {
+            return true;
+        }
+        if self.owned_by_other(up(p), net) || self.owned_by_other(down(p), net) {
+            return true;
+        }
+        Dir::ALL.iter().any(|&d| {
+            let n = offset(p, d);
+            [n, up(n), down(n)].into_iter().any(|c| self.owned_by_other(c, net))
+        })
     }
 
     fn owned_by_other(&self, p: Pos, net: NetId) -> bool {
@@ -975,6 +1024,7 @@ impl Router {
             if fresh {
                 self.note(Undo::Grid(p));
             }
+            watch(p, net, "commit");
             let prev_owner = self.owner.insert(p, net);
             if prev_owner != Some(net) {
                 self.note(Undo::Owner(p, prev_owner));

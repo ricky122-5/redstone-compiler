@@ -74,11 +74,11 @@ after the router took that job over. Every constant in it is a measured floor:
 at a tighter pitch the latch will not store a 1, at a closer offset the R gate's
 feed is walled in completely.
 
-`gcd.ohm` (724 gates, 42 flip-flops) does not place yet. Every one of its 1103
-connections routes when it has the grid to itself; routed together, one
-attempt each and no rip-up, 806 to 827 do, depending on the order they are
-tried in. About half the failures are the same in every order and sit on a few
-very wide nets; the other half move with the order. See the status section.
+`gcd.ohm` (724 gates, 42 flip-flops) places in full, 1131 of 1131 connections,
+and in the block simulator matches its netlist flop for flop: gcd(48,18) = 6 on
+cycle 25, then halts. An earlier in-game run read 6 off the lamps while the
+register held 2; that is corrected in the status section, and the in-game
+re-run is still to do.
 
 ## Quick start
 
@@ -1082,7 +1082,8 @@ the reset into flip-flop 19. So "0 unroutable" is necessary and not sufficient,
 and the working recipe above is one point in a space whose neighbours fail for
 reasons the headline number never mentions.
 
-**`gcd.ohm` computes in Minecraft.** Placed one block at a time by
+**`gcd.ohm` ran in Minecraft, and read 6 for the wrong reason** (see the
+correction after the table below). Placed one block at a time by
 `.mcfunction` into an unmodified server, cleared, loaded and clocked from the
 levers, with a=48 and b=18 on the input bits:
 
@@ -1120,8 +1121,37 @@ worst-case settling is 248 redstone ticks.
 
 | design | survey pass | built | checked |
 |---|---|---|---|
-| `gcd` | 1131 of 1131 after repair | 583,621 blocks | **Minecraft: g=6 at cycle 25** |
+| `gcd` | 1131 of 1131 after repair | 583,621 blocks | Minecraft read 6, register held 2 - see below |
 | `alu` | 572 of 572 | 177,702 blocks | simulator: 40 vectors, all correct |
+
+**Correction: that 6 was two wiring faults and a lamp misreading, and the
+transcript above shows it.** Read the state vector rather than the lamps. Flops
+0 to 7 are `g`, LSB first, and the final `Q` begins `01000000`: the register
+held **2**. The netlist, run before placement (`examples/net_run.rs`), ends
+`011000000110000001100000000000000010000001` - 6, and the last flop, `halted`,
+set. The build had two bits wrong and the lamps hid one of them.
+
+* *The lamps.* Adjacent lamps' keep-clear shells overlapped, and bit 1's wire
+  powered the block beside bit 2's lamp. Whenever bit 1 was on, bit 2's lamp
+  lit too, so a register holding 2 read 6. Fixed by giving each overlapping
+  cell to the nearest lamp; `triangle` read 31 for 15 the same way.
+* *Bit 2: a wire beside another gate's torch.* A torch powers every dust cell
+  beside it. `Router::from_grid`'s comment said levers and torches both had to
+  be kept clear; the code only handled levers. Net 47 ran beside a lit gate
+  torch and read 15 whenever that unrelated gate was high, and its relays
+  carried the false 1 to the gate that loads `g[2]`. Cells around every torch
+  are now a hazard for any net but the torch's own.
+* *`halted`: a spine laid without keepout.* Driver spines are laid with
+  `grid.set` and `claim`, not routed, so keepout never saw them. Flop 34's Q
+  spine ran one step below the edge of flop 41's macro and joined its dust;
+  once the machine reached its return state, that Q held flop 41's latch and
+  `halted` could never load. Spines now stop at the first cell that touches
+  anything not their own (`Router::touches_foreign`).
+
+With both fixes the placed build matches the netlist flop for flop on every
+cycle, `halted` included, and `cross_net` finds 0 contacts between different
+nets across 263,000 dust cells (7 before). This is the block simulator; the
+in-game re-run is still to do.
 
 **How much of `gcd` was the placer and how much was the field.** Both, and the
 order matters. The riser field alone takes the old sweep placer from 47
@@ -1242,9 +1272,10 @@ gets there alone.
    produced says the circularity was only half the story, and that the riser
    field being thirty blocks deep was costing more than the placer ever did.
 
-   `gcd` has since been run in the game and reads 6 for gcd(48,18) on the
-   cycle the model says it should. What is left is the two designs that still
-   do not place - `triangle`, which fails the same way under both placers - and
-   the fact that a 583,621-block build runs several times slower than real time
-   in a server, which makes every in-game check an hours-long affair.
+   `gcd` has since been run in the game, and its 6 turned out to be a lamp
+   misreading over a register holding 2 (see the correction above). With the
+   torch and spine keepout fixes, `gcd` and `triangle` both match their
+   netlists in the block simulator - `triangle` on 15, 55 and 253 - and the
+   next check is `gcd` in the game again. That remains an hours-long affair:
+   a 583,621-block build runs several times slower than real time in a server.
 

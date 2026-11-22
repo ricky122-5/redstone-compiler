@@ -17,13 +17,23 @@ fn main() {
     let src = std::fs::read_to_string(&path).unwrap();
     let prog = parser::parse(&src).unwrap();
     let design = lower::lower_program(&prog).unwrap();
-    let net = bitblast::blast_combinational(&design).unwrap();
+    // Sequential designs too, split the way `main` splits them.
+    let mut net = bitblast::blast_combinational(&design).unwrap_or_else(|_| bitblast::blast(&design));
+    if let Some(t) = std::env::var("OHMC_CLONE").ok().and_then(|v| v.parse::<usize>().ok()) {
+        net.clone_high_fanout(t);
+    }
+    if let Some(t) = std::env::var("OHMC_BUFFER").ok().and_then(|v| v.parse::<usize>().ok()) {
+        net.buffer_high_fanout(t);
+    }
     let lay = layout::build(&net).unwrap();
     let g = &lay.grid;
 
-    let sig = (0..net.sigs.len() as u32)
-        .find(|&s| matches!(*net.src(s), Src::Input { port: 0, bit: 0 }))
-        .unwrap();
+    // `OHMC_NET=n` names the net to search; the default is input 0 bit 0.
+    let sig = std::env::var("OHMC_NET").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or_else(|| {
+        (0..net.sigs.len() as u32)
+            .find(|&s| matches!(*net.src(s), Src::Input { port: 0, bit: 0 }))
+            .unwrap()
+    });
     let cells: HashSet<Pos> =
         lay.wire_owner.iter().filter(|(_, &o)| o == sig).map(|(&p, _)| p).collect();
     println!("net {sig}: {} cells", cells.len());

@@ -13,7 +13,14 @@ fn main() {
     let src = std::fs::read_to_string(&path).unwrap();
     let prog = parser::parse(&src).unwrap();
     let design = lower::lower_program(&prog).unwrap();
-    let net = bitblast::blast_combinational(&design).unwrap();
+    // Sequential designs too, split the way `main` splits them.
+    let mut net = bitblast::blast_combinational(&design).unwrap_or_else(|_| bitblast::blast(&design));
+    if let Some(t) = std::env::var("OHMC_CLONE").ok().and_then(|v| v.parse::<usize>().ok()) {
+        net.clone_high_fanout(t);
+    }
+    if let Some(t) = std::env::var("OHMC_BUFFER").ok().and_then(|v| v.parse::<usize>().ok()) {
+        net.buffer_high_fanout(t);
+    }
     let lay = layout::build(&net).unwrap();
     let g = &lay.grid;
 
