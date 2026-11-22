@@ -77,8 +77,8 @@ feed is walled in completely.
 `gcd.ohm` (724 gates, 42 flip-flops) places in full, 1131 of 1131 connections,
 and in the block simulator matches its netlist flop for flop: gcd(48,18) = 6 on
 cycle 25, then halts. An earlier in-game run read 6 off the lamps while the
-register held 2; that is corrected in the status section, and the in-game
-re-run is still to do.
+register held 2; with the wiring faults behind that fixed, the in-game re-run
+holds 6 in the register itself and sets `halted` (see the status section).
 
 ## Quick start
 
@@ -1121,7 +1121,7 @@ worst-case settling is 248 redstone ticks.
 
 | design | survey pass | built | checked |
 |---|---|---|---|
-| `gcd` | 1131 of 1131 after repair | 583,621 blocks | Minecraft read 6, register held 2 - see below |
+| `gcd` | 1131 of 1131 after repair | 583,621 blocks | Minecraft read 6, register held 2 - fixed below |
 | `alu` | 572 of 572 | 177,702 blocks | simulator: 40 vectors, all correct |
 
 **Correction: that 6 was two wiring faults and a lamp misreading, and the
@@ -1150,8 +1150,22 @@ set. The build had two bits wrong and the lamps hid one of them.
 
 With both fixes the placed build matches the netlist flop for flop on every
 cycle, `halted` included, and `cross_net` finds 0 contacts between different
-nets across 263,000 dust cells (7 before). This is the block simulator; the
-in-game re-run is still to do.
+nets across 263,000 dust cells (7 before). Re-run in an unmodified 1.21.4 server, from the same levers with 40-second
+clock phases:
+
+```
+--- input 4656  (a=48,b=18) ---
+  model: ran 25 cycle(s):
+  model:   g = 6
+input 4656:
+   cycle   1: lamps = 0   Q=000000000000000000001100010010000100000000
+   cycle  25: lamps = 6   Q=011000000110000001100000000000000010000001
+   final: 6   Q=011000000110000001100000000000000010000001
+```
+
+That final vector is the netlist's, bit for bit: `g` holds 6 and `halted` is
+set. **`gcd.ohm` computes in Minecraft** - this time the register says so, not
+just the lamps.
 
 **How much of `gcd` was the placer and how much was the field.** Both, and the
 order matters. The riser field alone takes the old sweep placer from 47
@@ -1275,7 +1289,8 @@ gets there alone.
    `gcd` has since been run in the game, and its 6 turned out to be a lamp
    misreading over a register holding 2 (see the correction above). With the
    torch and spine keepout fixes, `gcd` and `triangle` both match their
-   netlists in the block simulator - `triangle` on 15, 55 and 253 - and the
-   next check is `gcd` in the game again. That remains an hours-long affair:
-   a 583,621-block build runs several times slower than real time in a server.
+   netlists in the block simulator - `triangle` on 15, 55 and 253 - and `gcd`
+   computes 6 in the game with its register matching the netlist bit for bit.
+   Every in-game check is still an hours-long affair: a build this size runs
+   several times slower than real time in a server.
 
