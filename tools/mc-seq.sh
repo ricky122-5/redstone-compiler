@@ -42,8 +42,10 @@ OHMC="$REPO/target/release/ohmc"
 # can leave this binary behind. A run then validates code that no longer exists,
 # and passes or fails for reasons unrelated to the change being tested. That
 # happened three times in one session before this check existed.
-NEWEST_SRC=$(find "$REPO/src" -name '*.rs' -exec stat -f %m {} + | sort -n | tail -1)
-if [ "$(stat -f %m "$OHMC")" -lt "$NEWEST_SRC" ]; then
+# Modification time in seconds, on macOS (BSD stat) or Linux (GNU stat).
+mtime() { stat -f %m "$@" 2>/dev/null || stat -c %Y "$@"; }
+NEWEST_SRC=$(find "$REPO/src" -name '*.rs' -exec bash -c 'stat -f %m "$@" 2>/dev/null || stat -c %Y "$@"' _ {} + | sort -n | tail -1)
+if [ "$(mtime "$OHMC")" -lt "$NEWEST_SRC" ]; then
   echo "$OHMC is older than the source - run: cargo build --release"; exit 1
 fi
 mkdir -p "$D"

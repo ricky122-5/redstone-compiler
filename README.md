@@ -1167,6 +1167,23 @@ That final vector is the netlist's, bit for bit: `g` holds 6 and `halted` is
 set. **`gcd.ohm` computes in Minecraft** - this time the register says so, not
 just the lamps.
 
+**`triangle.ohm` computes in Minecraft too.** 492 gates, 29 flip-flops, 380,824
+blocks, run in an unmodified 1.21.4 server on three inputs with the same
+placement settings and 40-second clock phases:
+
+```
+input 5:    cycle 13: lamps = 15    Q=11110000000000001111000000011
+input 10:   cycle 23: lamps = 55    Q=11101100000000001110110000011
+input 22:   cycle 47: lamps = 253   Q=10111111000000001011111100011
+```
+
+Each answer lands on the cycle the golden model names (13, 23, 47) and holds
+to cycle 50, and each final state vector is the netlist's
+(`examples/net_run.rs`) bit for bit - the register, not just the lamps. n=22
+is the long case: 47 cycles of the loop, and a sum that carries into every bit
+of the 8-bit result. It ran on a cloud VM, at about 82 seconds a cycle; a
+laptop that sleeps stretches cycles to twenty minutes and more.
+
 **How much of `gcd` was the placer and how much was the field.** Both, and the
 order matters. The riser field alone takes the old sweep placer from 47
 unroutable to 8, and with repair on top of that it converges at **2** - close,
@@ -1289,8 +1306,8 @@ gets there alone.
    `gcd` has since been run in the game, and its 6 turned out to be a lamp
    misreading over a register holding 2 (see the correction above). With the
    torch and spine keepout fixes, `gcd` and `triangle` both match their
-   netlists in the block simulator - `triangle` on 15, 55 and 253 - and `gcd`
-   computes 6 in the game with its register matching the netlist bit for bit.
+   netlists, and both compute in the game with their registers matching the
+   netlist bit for bit: `gcd` 6 for gcd(48,18), `triangle` 15, 55 and 253.
    Every in-game check is still an hours-long affair: a build this size runs
    several times slower than real time in a server.
 
