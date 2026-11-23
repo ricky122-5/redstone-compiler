@@ -18,6 +18,9 @@
 set -u
 
 OHM="${1:-examples/invert.ohm}"
+# Absolute, because the script cd's into the server directory later and the
+# golden-model lookup for wide designs reads the source from there.
+case "$OHM" in /*) ;; *) OHM="$PWD/$OHM" ;; esac
 D="${2:-/tmp/ohm-mc}"
 JAR_URL="https://piston-data.mojang.com/v1/objects/4707d00eb834b446575d89a61a11b5d548d8c001/server.jar"
 JAR_SHA="4707d00eb834b446575d89a61a11b5d548d8c001"
@@ -30,7 +33,10 @@ mkdir -p "$D"
 # --- compile ---------------------------------------------------------------
 INFO=$("$OHMC" "$OHM" --mcfn "$D/circuit.mcfunction") || exit 1
 echo "$INFO"
-TRUTH=$("$OHMC" "$OHM" --truth) || exit 1
+# The full truth table, where it can be enumerated (16 input bits or fewer).
+# Wider designs get their expected values from the golden model, per sampled
+# case, once the case list is known - see below.
+TRUTH=$("$OHMC" "$OHM" --truth 2>/dev/null) || TRUTH=""
 # Settling time has to scale with the circuit, not be a fixed guess. Each NOR
 # cell is a repeater plus a torch (2 redstone ticks = 0.2s) and routing adds
 # more, so a deep circuit needs seconds. Too short and the probe reads a
@@ -38,6 +44,10 @@ TRUTH=$("$OHMC" "$OHM" --truth) || exit 1
 DEPTH=$("$OHMC" "$OHM" --stats | sed -n 's/.*logic depth *\([0-9]*\).*/\1/p')
 DEPTH=${DEPTH:-8}
 SETTLE=$(( 4 + DEPTH / 2 ))
+# `OHMC_SETTLE` overrides it. The formula undercuts deep designs: alu is depth
+# 32, so 20s, while the block simulator measures its worst case at 248 redstone
+# ticks - 24.8s at full speed, and a server that falls behind takes longer.
+SETTLE=${OHMC_SETTLE:-$SETTLE}
 echo "logic depth $DEPTH -> settling ${SETTLE}s per case"
 
 # Actual extents of the emitted circuit. A hardcoded clearing volume silently
@@ -165,7 +175,10 @@ send() { echo "$1" >&3; sleep "${2:-1}"; }
 FL_X2=$((BX + 16)); FL_Z2=$((BZ + 16))
 FL_CHUNKS=$(( ((FL_X2 + 48) / 16 + 1) * ((FL_Z2 + 48) / 16 + 1) ))
 echo "forceload -48 -48 $FL_X2 $FL_Z2 (~$FL_CHUNKS chunks)"
-[ "$FL_CHUNKS" -le 256 ] || { echo "circuit needs $FL_CHUNKS chunks, over the 256 forceload cap"; exit 1; }
+# Past the 256-chunk cap, do what mc-seq.sh does: keep the spawn square loaded
+# with spawnChunkRadius and force-load the rest in tiles of at most 16x16
+# chunks, rather than refusing the design. alu is past it.
+RAD=$(python3 -c "print(min(32, max($FL_X2, $FL_Z2) // 16 + 2))")
 # A function stops after `maxCommandChainLength` commands and says nothing
 # about it. The default is 65536, and a placed design passes that easily -
 # `count.ohm` is 87226 setblock commands, so the last quarter of the build was
@@ -173,7 +186,15 @@ echo "forceload -48 -48 $FL_X2 $FL_Z2 (~$FL_CHUNKS chunks)"
 # was exactly the wiring, and the result looked like a dead circuit rather than
 # an unfinished one.
 send "gamerule maxCommandChainLength 10000000" 2
-send "forceload add -48 -48 $FL_X2 $FL_Z2" 2
+send "gamerule spawnChunkRadius $RAD" 2
+for tx in $(seq -3 16 $((FL_X2 >> 4))); do
+  for tz in $(seq -3 16 $((FL_Z2 >> 4))); do
+    x0=$((tx*16)); z0=$((tz*16)); x1=$(((tx+15)*16+15)); z1=$(((tz+15)*16+15))
+    [ $x1 -gt $FL_X2 ] && x1=$FL_X2; [ $z1 -gt $FL_Z2 ] && z1=$FL_Z2
+    send "forceload add $x0 $z0 $x1 $z1" 0
+  done
+done
+sleep 2
 send "reload" 3
 send "execute positioned 0.0 0.0 0.0 run function ohm:circuit" 3
 
@@ -203,6 +224,29 @@ else
 full=$FULL; n=$MAXCASES
 stride=full//n
 print('\n'.join(str((i*stride+i)%full) for i in range(n)))")
+fi
+# Past 16 input bits `--truth` refuses to enumerate, so ask the golden model
+# for just the sampled cases, in the same `TRUTH v name=value` form. The flat
+# value splits across ports in lever order, LSB first, exactly as the sweep
+# drives it.
+if [ -z "$TRUTH" ]; then
+  TRUTH=$(python3 - "$OHMC" "$OHM" "$CASE_LIST" <<'PYT'
+import re, subprocess, sys
+ohmc, ohm, cases = sys.argv[1], sys.argv[2], sys.argv[3].split()
+info = subprocess.run([ohmc, ohm, "--stats"], capture_output=True, text=True).stdout
+src = open(ohm).read()
+ports = [(n, int(w)) for w, n in re.findall(r"^\s*input\s+u(\d+)\s+(\w+)\s*;", src, re.M)]
+outs = [n for n in re.findall(r"^\s*output\s+u\d+\s+(\w+)\s*;", src, re.M)]
+for v in cases:
+    v = int(v); rest = v; args = []
+    for n, w in ports:
+        args.append(f"{n}={rest & ((1 << w) - 1)}"); rest >>= w
+    out = subprocess.run([ohmc, ohm, "--run", ",".join(args)], capture_output=True, text=True).stdout
+    vals = dict(re.findall(r"^\s+(\w+) = (\d+)", out, re.M))
+    print(f"TRUTH {v} " + " ".join(f"{o}={vals[o]}" for o in outs))
+PYT
+) || exit 1
+  echo "expected values from the golden model for the sampled cases"
 fi
 CASES=$(echo "$CASE_LIST" | grep -c .)
 echo "sweeping $CASES of $FULL input combination(s), each way"
@@ -256,7 +300,9 @@ run_case() {
 }
 
 for v in $CASE_LIST; do run_case 1 "$v"; done
-for v in $(echo "$CASE_LIST" | tail -r); do run_case 2 "$v"; done
+# Reverse order; `tail -r` is BSD-only, `tac` GNU-only.
+REV=$(echo "$CASE_LIST" | { tac 2>/dev/null || tail -r; })
+for v in $REV; do run_case 2 "$v"; done
 
 send "stop" 2
 wait $SRV 2>/dev/null

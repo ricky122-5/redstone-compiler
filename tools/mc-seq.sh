@@ -43,8 +43,10 @@ OHMC="$REPO/target/release/ohmc"
 # and passes or fails for reasons unrelated to the change being tested. That
 # happened three times in one session before this check existed.
 # Modification time in seconds, on macOS (BSD stat) or Linux (GNU stat).
-mtime() { stat -f %m "$@" 2>/dev/null || stat -c %Y "$@"; }
-NEWEST_SRC=$(find "$REPO/src" -name '*.rs' -exec bash -c 'stat -f %m "$@" 2>/dev/null || stat -c %Y "$@"' _ {} + | sort -n | tail -1)
+# GNU first: on Linux `stat -f` means filesystem status and succeeds with the
+# wrong answer, so trying BSD's form first never falls through.
+mtime() { stat -c %Y "$@" 2>/dev/null || stat -f %m "$@"; }
+NEWEST_SRC=$(find "$REPO/src" -name '*.rs' -exec bash -c 'stat -c %Y "$@" 2>/dev/null || stat -f %m "$@"' _ {} + | sort -n | tail -1)
 if [ "$(mtime "$OHMC")" -lt "$NEWEST_SRC" ]; then
   echo "$OHMC is older than the source - run: cargo build --release"; exit 1
 fi

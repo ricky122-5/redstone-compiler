@@ -1184,6 +1184,46 @@ is the long case: 47 cycles of the loop, and a sum that carries into every bit
 of the 8-bit result. It ran on a cloud VM, at about 82 seconds a cycle; a
 laptop that sleeps stretches cycles to twenty minutes and more.
 
+**Broader in-game check: five more `gcd` inputs and a sampled `alu`.** Same
+unmodified 1.21.4 server and placement settings.
+
+| `gcd` case | a, b | g | cycle (model) | final Q matches netlist |
+|---|---|---|---|---|
+| b = 0 | 9, 0 | 9 | 5 (5) | yes |
+| equal | 21, 21 | 21 | 9 (9) | yes |
+| b divides a | 255, 85 | 85 | 17 (17) | yes |
+| a divides b | 12, 60 | 12 | 25 (25) | yes |
+| coprime | 13, 8 | 1 | 29 (29) | yes |
+
+(`a = 0` is left out on purpose: the program itself never halts on
+gcd(0, y), and the golden model says so.)
+
+`alu` has 18 input bits, so `tools/mc-validate.sh` samples 40 cases spread
+across the 2^18 space and drives each twice, ascending then descending, so a
+case is reached from two different predecessors. With 60 seconds of settling
+per case, **all 40 agree with the golden model on both passes.**
+
+With the harness's default settling, they did not, and the failure is worth
+recording because it looks like a circuit bug. The default is `4 + depth/2`
+seconds, which for `alu` (depth 32) is 20 s; 11 of 40 cases came back wrong,
+6 of them differently on the two passes, almost all subtractions and mostly
+bit 6. Replaying the same 80-step sequence through the block simulator shows
+why: most cases need 18 to 24 s to settle, so a 20 s read catches the longest
+carry chains mid-flight. The default formula undercuts deep designs;
+`OHMC_SETTLE` now overrides it.
+
+The same replay has the simulator ring - never settle - for four cases after
+`a=110 b=230 op=1`, then recover. The game, given time, settles there and
+answers correctly on both passes, which fits the known gap: a deterministic
+simulator sustains a one-tick pulse round a loop that real redstone damps.
+
+To run `alu` at all, `mc-validate.sh` gained three things: expected values
+from the golden model for sampled cases when `--truth` refuses to enumerate
+past 16 bits; loading large builds through `spawnChunkRadius` and tiled
+`forceload` (alu needs ~520 chunks, past the 256 cap) as `mc-seq.sh` does; and
+Linux support. `examples/sim_sweep.rs` takes `OHMC_CASE_LIST` to replay an
+exact in-game sequence.
+
 **How much of `gcd` was the placer and how much was the field.** Both, and the
 order matters. The riser field alone takes the old sweep placer from 47
 unroutable to 8, and with repair on top of that it converges at **2** - close,

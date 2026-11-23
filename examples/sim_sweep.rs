@@ -44,8 +44,13 @@ fn main() {
     let step: u64 =
         std::env::var("OHMC_CASE_STEP").ok().and_then(|v| v.parse().ok()).unwrap_or(1).max(1);
     let span = 1u64 << levers.len();
-    for k in 0..cases {
-        let v = k.wrapping_mul(step) % span;
+    // `OHMC_CASE_LIST` names the cases outright, in order - to replay exactly
+    // the sequence an in-game sweep drove, history and all.
+    let list: Vec<u64> = match std::env::var("OHMC_CASE_LIST") {
+        Ok(s) => s.split(|c: char| c == ',' || c.is_whitespace()).filter_map(|x| x.parse().ok()).collect(),
+        Err(_) => (0..cases).map(|k| k.wrapping_mul(step) % span).collect(),
+    };
+    for v in list {
         for (i, &l) in levers.iter().enumerate() {
             sim.set_lever(l, (v >> i) & 1 == 1);
         }
